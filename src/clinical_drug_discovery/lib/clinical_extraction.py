@@ -3,11 +3,13 @@ Clinical extraction utilities for drug-disease co-occurrences.
 """
 
 from collections import Counter
-from typing import Dict
+from typing import Dict, Tuple
 
 import pandas as pd
 import spacy
 from tqdm import tqdm
+
+from .name_matching import create_name_matcher
 
 
 def download_mtsamples():
@@ -306,3 +308,71 @@ def get_extraction_stats(clinical_pairs_df: pd.DataFrame) -> Dict[str, int]:
         print(f"  Standard deviation: {clinical_pairs_df['score'].std():.3f}")
 
     return stats
+
+
+def extract_and_normalize_drug_disease_pairs(
+    notes_df: pd.DataFrame,
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    database: str = "primekg",
+    ner_model: str = "en_ner_bc5cdr_md",
+    min_frequency: int = 2,
+    max_note_length: int = 10000,
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Extract drug-disease pairs from clinical notes and normalize to PrimeKG node IDs.
+    
+    Args:
+        notes_df: DataFrame with clinical notes
+        neo4j_uri: Neo4j connection URI
+        neo4j_user: Neo4j username
+        neo4j_password: Neo4j password
+        database: Database name
+        ner_model: Name of spaCy NER model to use
+        min_frequency: Minimum frequency for a pair to be included
+        max_note_length: Maximum characters to process per note
+        
+    Returns:
+        Tuple of (normalized_df with node IDs, combined_stats)
+    """
+    print("\n" + "="*60)
+    print("CLINICAL EXTRACTION WITH NAME NORMALIZATION")
+    print("="*60)
+    
+    # Step 1: Extract raw clinical pairs
+    print("\nStep 1: Extracting drug-disease pairs from clinical notes...")
+    raw_pairs = extract_drug_disease_pairs(
+        notes_df=notes_df,
+        ner_model=ner_model,
+        min_frequency=min_frequency,
+        max_note_length=max_note_length,
+    )
+    
+    if len(raw_pairs) == 0:
+        print("Warning: No clinical pairs extracted")
+        return pd.DataFrame(), {"extraction_stats": {}, "normalization_stats": {}}
+    
+    # Step 2: Normalize names to PrimeKG node IDs
+    print(f"\nStep 2: Normalizing {len(raw_pairs)} pairs to PrimeKG node IDs...")
+    name_matcher = create_name_matcher(neo4j_uri, neo4j_user, neo4j_password, database)
+    normalized_pairs, normalization_stats = name_matcher.normalize_clinical_pairs(raw_pairs)
+    
+    # Step 3: Get extraction stats
+    extraction_stats = get_extraction_stats(raw_pairs)
+    
+    # Combine stats
+    combined_stats = {
+        "extraction_stats": extraction_stats,
+        "normalization_stats": normalization_stats,
+        "final_normalized_pairs": len(normalized_pairs)
+    }
+    
+    print(f"\n" + "="*60)
+    print("CLINICAL EXTRACTION SUMMARY")
+    print("="*60)
+    print(f"Raw pairs extracted: {len(raw_pairs)}")
+    print(f"Pairs after normalization: {len(normalized_pairs)}")
+    print(f"Retention rate: {len(normalized_pairs)/len(raw_pairs)*100:.1f}%" if len(raw_pairs) > 0 else "0%")
+    
+    return normalized_pairs, combined_stats

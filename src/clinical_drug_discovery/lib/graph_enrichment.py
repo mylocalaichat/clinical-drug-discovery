@@ -21,7 +21,7 @@ def add_clinical_evidence_to_graph(
     Add CLINICAL_EVIDENCE relationships to Neo4j graph.
 
     Args:
-        clinical_pairs: DataFrame with columns: drug, disease, score (proportional -1 to +1)
+        clinical_pairs: DataFrame with columns: drug_id, disease_id, score (normalized node IDs)
         neo4j_uri: Neo4j connection URI
         neo4j_user: Neo4j username
         neo4j_password: Neo4j password
@@ -51,13 +51,11 @@ def add_clinical_evidence_to_graph(
 
             with driver.session(database=database) as session:
                 query = """
-                MATCH (drug:PrimeKGNode)
+                MATCH (drug:PrimeKGNode {node_id: $drug_id})
                 WHERE drug.node_type = 'drug'
-                  AND toLower(drug.node_name) CONTAINS toLower($drug_name)
-
-                MATCH (disease:PrimeKGNode)
+                
+                MATCH (disease:PrimeKGNode {node_id: $disease_id})
                 WHERE disease.node_type = 'disease'
-                  AND toLower(disease.node_name) CONTAINS toLower($disease_name)
 
                 MERGE (drug)-[r:CLINICAL_EVIDENCE]->(disease)
                 SET r.score = $score,
@@ -79,8 +77,8 @@ def add_clinical_evidence_to_graph(
 
                     result = session.run(
                         query,
-                        drug_name=row['drug'],
-                        disease_name=row['disease'],
+                        drug_id=row['drug_id'],
+                        disease_id=row['disease_id'],
                         score=float(row['score']),
                         confidence=confidence,
                         evidence_strength=evidence_strength
