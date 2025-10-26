@@ -132,18 +132,26 @@ def query_enhanced_drug_discovery(
              base_score,
              shared_protein_count,
              similar_disease_count,
-             COALESCE(clinical.frequency, 0) as clinical_frequency,
+             COALESCE(clinical.score, 0.0) as clinical_score,
              COALESCE(clinical.confidence, 0.0) as clinical_confidence,
-             base_score + (COALESCE(clinical.confidence, 0.0) * 100) as enhanced_score
+             COALESCE(clinical.evidence_strength, 'none') as evidence_strength,
+             // Enhanced score: base score + clinical evidence boost
+             // Positive clinical scores get significant boost, negative scores get penalty
+             base_score + (COALESCE(clinical.score, 0.0) * 50) as enhanced_score
 
         RETURN candidate_drug.node_name as drug_name,
                enhanced_score as score,
                base_score,
-               clinical_frequency,
+               clinical_score,
                clinical_confidence,
+               evidence_strength,
                shared_protein_count,
                similar_disease_count,
-               CASE WHEN clinical_frequency > 0 THEN 'Graph + Clinical' ELSE 'Graph Only' END as evidence_type
+               CASE 
+                 WHEN clinical_score > 0 THEN 'Graph + Positive Clinical' 
+                 WHEN clinical_score < 0 THEN 'Graph + Negative Clinical'
+                 ELSE 'Graph Only' 
+               END as evidence_type
         ORDER BY enhanced_score DESC
         LIMIT 20
         """
@@ -155,7 +163,7 @@ def query_enhanced_drug_discovery(
         print(f"Found {len(df)} candidate drugs (enhanced query)")
         if len(df) > 0:
             print("Top 5 drugs (enhanced):")
-            print(df[['drug_name', 'score', 'base_score', 'clinical_frequency', 'evidence_type']].head().to_string(index=False))
+            print(df[['drug_name', 'score', 'base_score', 'clinical_score', 'evidence_type']].head().to_string(index=False))
 
         return df
 
@@ -197,13 +205,13 @@ def compare_discovery_results(
 
     print("Comparison Summary:")
     print(f"Total drugs in enhanced results: {len(comparison)}")
-    drugs_with_clinical = len(comparison[comparison['clinical_frequency'] > 0])
+    drugs_with_clinical = len(comparison[comparison['clinical_score'] != 0])
     print(f"Drugs with clinical evidence: {drugs_with_clinical}")
 
     if drugs_with_clinical > 0:
-        print("Top 5 drugs with clinical boost:")
-        clinical_df = comparison[comparison['clinical_frequency'] > 0][
-            ['drug_name', 'score_enhanced', 'score_improvement', 'clinical_frequency', 'clinical_confidence']
+        print("Top 5 drugs with clinical evidence:")
+        clinical_df = comparison[comparison['clinical_score'] != 0][
+            ['drug_name', 'score_enhanced', 'score_improvement', 'clinical_score', 'evidence_strength']
         ].head()
         print(clinical_df.to_string(index=False))
 
@@ -253,7 +261,7 @@ def log_results_to_mlflow(
         mlflow.log_metrics({
             "base_candidates_found": len(base_results),
             "enhanced_candidates_found": len(enhanced_results),
-            "candidates_with_clinical_evidence": len(comparison[comparison['clinical_frequency'] > 0]) if len(comparison) > 0 else 0,
+            "candidates_with_clinical_evidence": len(comparison[comparison['clinical_score'] != 0]) if len(comparison) > 0 else 0,
         })
 
         if len(comparison) > 0:

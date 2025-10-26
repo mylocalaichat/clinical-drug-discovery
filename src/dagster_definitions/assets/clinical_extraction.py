@@ -2,10 +2,12 @@
 Dagster assets for extracting clinical evidence from medical notes.
 """
 
+import os
+from pathlib import Path
 from typing import Dict
 
 import pandas as pd
-from dagster import AssetExecutionContext, asset
+from dagster import AssetExecutionContext, MetadataValue, asset
 
 from clinical_drug_discovery.lib.clinical_extraction import (
     download_mtsamples,
@@ -43,7 +45,19 @@ def clinical_drug_disease_pairs(
     context.log.info(f"Extracted {len(result):,} unique drug-disease pairs")
 
     # Save to CSV for inspection
-    result.to_csv("data/03_primary/clinical_drug_disease_pairs.csv", index=False)
+    output_file = "data/03_primary/clinical_drug_disease_pairs.csv"
+    result.to_csv(output_file, index=False)
+
+    # Get absolute path for display
+    output_path = Path(output_file).resolve()
+    context.log.info(f"Saved to: {output_path}")
+
+    # Add metadata to show in Dagster UI
+    context.add_output_metadata({
+        "num_pairs": len(result),
+        "output_file": MetadataValue.path(str(output_path)),
+        "preview": MetadataValue.md(result.head(10).to_markdown()),
+    })
 
     return result
 

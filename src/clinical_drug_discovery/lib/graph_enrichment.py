@@ -15,18 +15,18 @@ def add_clinical_evidence_to_graph(
     neo4j_user: str,
     neo4j_password: str,
     database: str = "primekg",
-    min_frequency: int = 2,
+    min_score: float = 0.1,
 ) -> Dict[str, int]:
     """
     Add CLINICAL_EVIDENCE relationships to Neo4j graph.
 
     Args:
-        clinical_pairs: DataFrame with columns: drug_name, disease_name, frequency
+        clinical_pairs: DataFrame with columns: drug, disease, score (proportional -1 to +1)
         neo4j_uri: Neo4j connection URI
         neo4j_user: Neo4j username
         neo4j_password: Neo4j password
         database: Database name
-        min_frequency: Minimum frequency to create relationship
+        min_score: Minimum score to create relationship (0.1 means only positive associations)
 
     Returns:
         Dictionary with enrichment statistics
@@ -39,15 +39,15 @@ def add_clinical_evidence_to_graph(
     try:
         print(f"\nAdding clinical evidence to Neo4j...")
         print(f"Total pairs to process: {len(clinical_pairs):,}")
-        print(f"Minimum frequency threshold: {min_frequency}")
+        print(f"Minimum score threshold: {min_score}")
 
         for _, row in tqdm(clinical_pairs.iterrows(), total=len(clinical_pairs), desc="Adding clinical evidence"):
-            if row['frequency'] < min_frequency:
+            if row['score'] < min_score:
                 skipped += 1
                 continue
 
-            # Calculate confidence score (normalize frequency to 0-1 range)
-            confidence = min(row['frequency'] / 10.0, 1.0)
+            # Use absolute score as confidence (strength of evidence)
+            confidence = abs(float(row['score']))
 
             with driver.session(database=database) as session:
                 query = """
@@ -60,19 +60,30 @@ def add_clinical_evidence_to_graph(
                   AND toLower(disease.node_name) CONTAINS toLower($disease_name)
 
                 MERGE (drug)-[r:CLINICAL_EVIDENCE]->(disease)
-                SET r.frequency = $frequency,
+                SET r.score = $score,
                     r.source = 'MTSamples',
-                    r.confidence = $confidence
+                    r.confidence = $confidence,
+                    r.evidence_strength = $evidence_strength
                 RETURN drug.node_name as drug, disease.node_name as disease
                 """
 
                 try:
+                    # Categorize evidence strength
+                    abs_score = abs(row['score'])
+                    if abs_score >= 0.7:
+                        evidence_strength = 'strong'
+                    elif abs_score >= 0.3:
+                        evidence_strength = 'moderate' 
+                    else:
+                        evidence_strength = 'weak'
+
                     result = session.run(
                         query,
-                        drug_name=row['drug_name'],
-                        disease_name=row['disease_name'],
-                        frequency=int(row['frequency']),
-                        confidence=float(confidence)
+                        drug_name=row['drug'],
+                        disease_name=row['disease'],
+                        score=float(row['score']),
+                        confidence=confidence,
+                        evidence_strength=evidence_strength
                     )
 
                     if result.single():

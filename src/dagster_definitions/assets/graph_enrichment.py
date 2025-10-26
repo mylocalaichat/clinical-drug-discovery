@@ -34,7 +34,7 @@ def clinical_enrichment_stats(
         neo4j_user=os.getenv("NEO4J_USER"),
         neo4j_password=os.getenv("NEO4J_PASSWORD"),
         database=os.getenv("NEO4J_DATABASE"),
-        min_frequency=2,
+        min_score=0.1,  # Include moderate to strong positive associations
     )
 
     context.log.info(

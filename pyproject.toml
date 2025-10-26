@@ -22,6 +22,9 @@ dependencies = [
 where = ["src"]
 namespaces = false
 
+[tool.dagster]
+module_name = "dagster_definitions"
+
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"

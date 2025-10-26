@@ -1,6 +1,6 @@
-// GENERIC OFF-LABEL DRUG DISCOVERY QUERY
-// Works for ANY disease using only graph topology
-// Finds drugs through diseases that share proteins
+// ENHANCED OFF-LABEL DRUG DISCOVERY QUERY WITH CLINICAL EVIDENCE
+// Works for ANY disease using graph topology + clinical evidence scores
+// Finds drugs through diseases that share proteins AND considers clinical evidence
 //
 // Usage: Set disease_id parameter to any disease node_id
 // Example: WITH '15564' as disease_id  // Castleman's disease
@@ -30,41 +30,61 @@ WITH candidate_drug,
      count(DISTINCT similar_disease) as similar_disease_count,
      count(DISTINCT shared_protein) as shared_protein_count,
      collect(DISTINCT similar_disease.node_name)[0..5] as similar_diseases,
-     collect(DISTINCT shared_protein.node_name) as shared_proteins
+     collect(DISTINCT shared_protein.node_name) as shared_proteins,
+     // Base relevance score: shared proteins (10pts each) + similar diseases (1pt each)
+     (count(DISTINCT shared_protein) * 10) + count(DISTINCT similar_disease) as base_score
 
-// Step 5: Get drug targets for additional context
+// Step 5: Add clinical evidence if available
+OPTIONAL MATCH (candidate_drug)-[clinical:CLINICAL_EVIDENCE]->(target_disease)
+
+// Step 6: Get drug targets for additional context
 OPTIONAL MATCH (candidate_drug)-[r:DRUG_PROTEIN]-(drug_target:PrimeKGNode)
 WHERE drug_target.node_type = 'gene/protein'
 
 WITH candidate_drug,
+     base_score,
      shared_protein_count,
      similar_disease_count,
      shared_proteins,
      similar_diseases,
      collect(DISTINCT drug_target.node_name)[0..10] as drug_targets,
      collect(DISTINCT r.display_relation) as interaction_types,
-     // Relevance score: shared proteins (10pts each) + similar diseases (1pt each)
-     (shared_protein_count * 10) + similar_disease_count as relevance_score
+     COALESCE(clinical.score, 0.0) as clinical_score,
+     COALESCE(clinical.confidence, 0.0) as clinical_confidence,
+     COALESCE(clinical.evidence_strength, 'none') as evidence_strength,
+     // Enhanced relevance score: base score + clinical evidence boost/penalty
+     // Positive clinical scores get significant boost, negative scores get penalty
+     base_score + (COALESCE(clinical.score, 0.0) * 50) as enhanced_score
 
-// Step 6: Return results ordered by relevance
+// Step 7: Return results ordered by enhanced relevance
 RETURN candidate_drug.node_id as drug_id,
        candidate_drug.node_name as drug_name,
        candidate_drug.description as description,
        substring(coalesce(candidate_drug.mechanism_of_action, 'N/A'), 0, 300) as mechanism,
-       relevance_score,
+       enhanced_score,
+       base_score,
+       clinical_score,
+       clinical_confidence,
+       evidence_strength,
        shared_protein_count,
        shared_proteins,
        similar_disease_count,
        similar_diseases,
        drug_targets,
-       interaction_types
-ORDER BY relevance_score DESC, shared_protein_count DESC
+       interaction_types,
+       CASE 
+         WHEN clinical_score > 0 THEN 'Graph + Positive Clinical' 
+         WHEN clinical_score < 0 THEN 'Graph + Negative Clinical'
+         ELSE 'Graph Only' 
+       END as evidence_type
+ORDER BY enhanced_score DESC, shared_protein_count DESC
 LIMIT 20
 
 // INTERPRETATION:
-// - Higher relevance_score = more similar to diseases sharing proteins with target
+// - enhanced_score = base relevance + clinical evidence boost/penalty
+// - clinical_score = proportional score (-1 to +1) from clinical text analysis
+// - evidence_strength = 'strong', 'moderate', 'weak', or 'none'
+// - Positive clinical_score boosts ranking, negative penalizes it
 // - shared_protein_count = number of proteins shared between target and similar diseases
 // - similar_disease_count = number of similar diseases this drug treats
-// - shared_proteins = which proteins create the connection
-// - similar_diseases = example diseases that are similar to target
-// - drug_targets = what proteins this drug actually targets
+// - evidence_type = shows if clinical evidence influenced the ranking

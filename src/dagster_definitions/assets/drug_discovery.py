@@ -3,10 +3,11 @@ Dagster assets for drug discovery queries and comparison with MLflow tracking.
 """
 
 import os
+from pathlib import Path
 from typing import Dict
 
 import pandas as pd
-from dagster import AssetExecutionContext, asset
+from dagster import AssetExecutionContext, MetadataValue, asset
 from dotenv import load_dotenv
 
 from clinical_drug_discovery.lib.drug_discovery import (
@@ -92,9 +93,20 @@ def drug_discovery_results(
         final_results = pd.concat(all_results, ignore_index=True)
 
         # Save to CSV
-        output_path = "data/07_model_output/drug_discovery_results.csv"
-        final_results.to_csv(output_path, index=False)
-        context.log.info(f"Saved results to {output_path}")
+        output_file = "data/07_model_output/drug_discovery_results.csv"
+        final_results.to_csv(output_file, index=False)
+
+        # Get absolute path for display
+        output_path = Path(output_file).resolve()
+        context.log.info(f"Saved to: {output_path}")
+
+        # Add metadata to show in Dagster UI
+        context.add_output_metadata({
+            "num_candidates": len(final_results),
+            "num_diseases": final_results['disease_id'].nunique() if 'disease_id' in final_results.columns else 0,
+            "output_file": MetadataValue.path(str(output_path)),
+            "preview": MetadataValue.md(final_results.head(10).to_markdown()),
+        })
 
         return final_results
     else:
