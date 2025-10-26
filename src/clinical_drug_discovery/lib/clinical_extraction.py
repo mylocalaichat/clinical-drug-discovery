@@ -289,20 +289,32 @@ def get_extraction_stats(clinical_pairs_df: pd.DataFrame) -> Dict[str, int]:
         for key, value in stats.items():
             print(f"  {key}: {value:,}")
     else:
+        # Handle both normalized (drug_id/disease_id) and raw (drug/disease) formats
+        if 'drug_id' in clinical_pairs_df.columns:
+            # Normalized format with node IDs
+            drug_col = 'drug_id'
+            disease_col = 'disease_id'
+            data_type = "normalized"
+        else:
+            # Raw format with names
+            drug_col = 'drug'
+            disease_col = 'disease'
+            data_type = "raw"
+            
         stats = {
             "total_pairs": len(clinical_pairs_df),
-            "unique_drugs": int(clinical_pairs_df['drug'].nunique()),
-            "unique_diseases": int(clinical_pairs_df['disease'].nunique()),
+            "unique_drugs": int(clinical_pairs_df[drug_col].nunique()),
+            "unique_diseases": int(clinical_pairs_df[disease_col].nunique()),
             "positive_associations": int((clinical_pairs_df['score'] > 0).sum()),
             "negative_associations": int((clinical_pairs_df['score'] < 0).sum()),
             "neutral_associations": int((clinical_pairs_df['score'] == 0).sum()),
         }
 
-        print("\nClinical Extraction Statistics:")
+        print(f"\nClinical Extraction Statistics ({data_type} format):")
         for key, value in stats.items():
             print(f"  {key}: {value:,}")
 
-        print(f"\nScore Statistics:")
+        print("\nScore Statistics:")
         print(f"  Average score: {clinical_pairs_df['score'].mean():.3f}")
         print(f"  Score range: {clinical_pairs_df['score'].min():.3f} to {clinical_pairs_df['score'].max():.3f}")
         print(f"  Standard deviation: {clinical_pairs_df['score'].std():.3f}")
@@ -368,7 +380,7 @@ def extract_and_normalize_drug_disease_pairs(
         "final_normalized_pairs": len(normalized_pairs)
     }
     
-    print(f"\n" + "="*60)
+    print("\n" + "="*60)
     print("CLINICAL EXTRACTION SUMMARY")
     print("="*60)
     print(f"Raw pairs extracted: {len(raw_pairs)}")
