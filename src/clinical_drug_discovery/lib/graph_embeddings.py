@@ -25,6 +25,7 @@ def load_graph_from_neo4j(
     database: str = "primekg",
     exclude_edge_types: Optional[List[str]] = None,
     limit_nodes: Optional[int] = None,
+    logger = None,
 ) -> nx.Graph:
     """
     Load knowledge graph from Neo4j into NetworkX.
@@ -36,6 +37,7 @@ def load_graph_from_neo4j(
         database: Database name
         exclude_edge_types: Edge types to exclude (e.g., ['INDICATION'] to prevent leakage)
         limit_nodes: Limit number of nodes to load for testing (None for all nodes)
+        logger: Optional logger for Dagster integration
 
     Returns:
         NetworkX graph
@@ -49,13 +51,34 @@ def load_graph_from_neo4j(
 
     # Build limit clause for testing with smaller graphs
     if limit_nodes:
-        # First get a sample of nodes, then their edges
+        # Create two separate network components with multiple edges between node pairs
+        # Use multi-edge component approach for sampling
+        exclude_filter_r1 = ""
+        exclude_filter_r = ""
+        if exclude_edge_types:
+            exclude_filter_r1 = f"AND NOT type(r1) IN {exclude_edge_types}"
+            exclude_filter_r = f"AND NOT type(r) IN {exclude_edge_types}"
+        
         query = f"""
-        MATCH (n:PrimeKGNode)
-        WITH n LIMIT {limit_nodes}
+        MATCH (n1:PrimeKGNode)-[r1]-(n2:PrimeKGNode)
+        WHERE r1 IS NOT NULL
+        {exclude_filter_r1}
+        WITH n1, n2, count(r1) as edge_count
+        WHERE edge_count >= 3
+        WITH n1, n2, edge_count
+        ORDER BY edge_count DESC
+        LIMIT 2
+        WITH collect({{node1: n1, node2: n2}}) as node_pairs
+        UNWIND node_pairs as pair
+        WITH collect(DISTINCT pair.node1) + collect(DISTINCT pair.node2) as selected_nodes
+        UNWIND selected_nodes as node
+        WITH DISTINCT node
+        WITH collect(node)[0..{limit_nodes}] as final_nodes
+        UNWIND final_nodes as n
         MATCH (n)-[r]->(m:PrimeKGNode)
         WHERE r IS NOT NULL
-        {edge_filter}
+        {exclude_filter_r}
+        AND m IN final_nodes
         RETURN n.node_id as source, m.node_id as target, type(r) as edge_type
         """
     else:
@@ -68,7 +91,63 @@ def load_graph_from_neo4j(
         """
 
     limit_info = f" (limited to {limit_nodes} nodes)" if limit_nodes else ""
-    print(f"Loading graph from Neo4j{limit_info}...")
+    log_msg = f"Loading graph from Neo4j{limit_info}..."
+    if logger:
+        logger.info(log_msg)
+    else:
+        print(log_msg)
+    
+    # Log the actual Cypher query being executed
+    query_log = f"Executing Cypher query (NetworkX):\n{'=' * 50}\n{query.strip()}\n{'=' * 50}"
+    if logger:
+        logger.info(query_log)
+    else:
+        print(query_log)
+    
+    # Generate and log the Neo4j Browser visualization query
+    if limit_nodes:
+        exclude_filter_r1 = ""
+        exclude_filter_r = ""
+        if exclude_edge_types:
+            exclude_filter_r1 = f"AND NOT type(r1) IN {exclude_edge_types}"
+            exclude_filter_r = f"AND NOT type(r) IN {exclude_edge_types}"
+        
+        viz_query = f"""
+        MATCH (n1:PrimeKGNode)-[r1]-(n2:PrimeKGNode)
+        WHERE r1 IS NOT NULL
+        {exclude_filter_r1}
+        WITH n1, n2, count(r1) as edge_count
+        WHERE edge_count >= 3
+        WITH n1, n2, edge_count
+        ORDER BY edge_count DESC
+        LIMIT 2
+        WITH collect({{node1: n1, node2: n2}}) as node_pairs
+        UNWIND node_pairs as pair
+        WITH collect(DISTINCT pair.node1) + collect(DISTINCT pair.node2) as selected_nodes
+        UNWIND selected_nodes as node
+        WITH DISTINCT node
+        WITH collect(node)[0..{limit_nodes}] as final_nodes
+        UNWIND final_nodes as n
+        MATCH (n)-[r]->(m:PrimeKGNode)
+        WHERE r IS NOT NULL
+        {exclude_filter_r}
+        AND m IN final_nodes
+        RETURN n, r, m
+        """
+    else:
+        viz_query = f"""
+        MATCH (n:PrimeKGNode)-[r]->(m:PrimeKGNode)
+        WHERE r IS NOT NULL
+        {edge_filter}
+        RETURN n, r, m
+        """
+    
+    viz_query_log = f"Neo4j Browser visualization query:\n{'=' * 50}\n{viz_query.strip()}\n{'=' * 50}"
+    if logger:
+        logger.info(viz_query_log)
+    else:
+        print(viz_query_log)
+    
     try:
         with driver.session(database=database) as session:
             result = session.run(query)
@@ -79,7 +158,11 @@ def load_graph_from_neo4j(
         G.add_edges_from(edges)
 
         limit_msg = f" (limited from {limit_nodes} source nodes)" if limit_nodes else ""
-        print(f"Loaded graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges{limit_msg}")
+        result_log = f"Loaded graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges{limit_msg}"
+        if logger:
+            logger.info(result_log)
+        else:
+            print(result_log)
         return G
 
     finally:

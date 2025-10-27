@@ -134,10 +134,40 @@ def extract_drug_disease_pairs(
         where score is 1 if positive association, 0 if negative/neutral
     """
     print(f"\nLoading NER model: {ner_model}...")
+    
+    # Enhanced model loading with diagnostics
     try:
-        nlp = spacy.load(ner_model)
-    except OSError:
-        print(f"Model {ner_model} not found. Please run: ./install_models.sh")
+        import spacy.util
+        
+        # Check if model is installed
+        installed_models = spacy.util.get_installed_models()
+        print(f"Available models: {installed_models}")
+        
+        if ner_model not in installed_models:
+            print(f"ERROR: Model {ner_model} not found in installed models")
+            print(f"Available models: {installed_models}")
+            print(f"Please run: ./install_models.sh")
+            raise OSError(f"Model {ner_model} not installed")
+        
+        # Try to load the model with warnings suppressed temporarily
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="spacy")
+            warnings.filterwarnings("ignore", category=FutureWarning, module="spacy")
+            nlp = spacy.load(ner_model)
+        
+        print(f"✓ Successfully loaded {ner_model}")
+        print(f"  Pipeline components: {nlp.pipe_names}")
+        
+    except OSError as e:
+        print(f"ERROR: Failed to load model {ner_model}")
+        print(f"Error details: {e}")
+        print(f"Available models: {spacy.util.get_installed_models()}")
+        print(f"Please run: ./install_models.sh")
+        raise
+    except Exception as e:
+        print(f"UNEXPECTED ERROR loading model {ner_model}: {e}")
+        print(f"Available models: {spacy.util.get_installed_models()}")
         raise
 
     # Store pairs with association types: (drug, disease, association_type)

@@ -41,6 +41,26 @@ def clinical_drug_disease_pairs(
     # Log that data loading is complete
     context.log.info(f"Data loading complete - drugs: {len(drug_features_loaded)} entities, diseases: {len(disease_features_loaded)} entities")
 
+    # Add environment diagnostics for spaCy model issues
+    import sys
+    import spacy
+    context.log.info(f"Python executable: {sys.executable}")
+    context.log.info(f"spaCy version: {spacy.__version__}")
+    
+    try:
+        import spacy.util
+        installed_models = spacy.util.get_installed_models()
+        context.log.info(f"Available spaCy models: {installed_models}")
+        
+        # Test model loading in Dagster context
+        if "en_ner_bc5cdr_md" in installed_models:
+            context.log.info("✓ en_ner_bc5cdr_md found in installed models")
+        else:
+            context.log.error(f"✗ en_ner_bc5cdr_md NOT found. Available: {installed_models}")
+            
+    except Exception as e:
+        context.log.error(f"Error checking spaCy models: {e}")
+
     # Set MLflow experiment
     mlflow.set_experiment("clinical-drug-discovery")
 
@@ -69,8 +89,8 @@ def clinical_drug_disease_pairs(
         # Log metrics to MLflow
         mlflow.log_metrics({
             "num_extracted_pairs": len(result),
-            "num_unique_drugs": result['drug_name'].nunique() if len(result) > 0 else 0,
-            "num_unique_diseases": result['disease_name'].nunique() if len(result) > 0 else 0,
+            "num_unique_drugs": result['drug_id'].nunique() if len(result) > 0 else 0,
+            "num_unique_diseases": result['disease_id'].nunique() if len(result) > 0 else 0,
         })
 
         # Log extraction stats

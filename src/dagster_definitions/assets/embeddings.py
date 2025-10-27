@@ -10,6 +10,7 @@ This module splits the graph embeddings process into multiple assets:
 """
 
 import os
+import hashlib
 from pathlib import Path
 from typing import Dict
 
@@ -17,11 +18,11 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from dagster import AssetExecutionContext, asset
+from neo4j import GraphDatabase
 
 from clinical_drug_discovery.lib.graph_embeddings import (
     create_embedding_dataframe,
     flatten_embeddings_for_model,
-    load_graph_from_neo4j,
     save_embeddings,
     train_node2vec_embeddings,
 )
@@ -47,26 +48,104 @@ def knowledge_graph(
     # Exclude INDICATION edges to prevent data leakage in link prediction
     exclude_edges = ["INDICATION", "CONTRAINDICATION"]
     
-    # Use a very small limit for testing (1 node)
-    limit_nodes = 1
-    context.log.info(f"Testing with minimal graph: {limit_nodes} node")
+    # Define the 5-hop path query for graph loading with deterministic ordering
+    five_hop_query = """
+    MATCH path = (start:PrimeKGNode)-[r1]->(n1:PrimeKGNode)-[r2]->(n2:PrimeKGNode)-[r3]->(n3:PrimeKGNode)-[r4]->(n4:PrimeKGNode)-[r5]->(end:PrimeKGNode)
+    WHERE start.node_id <> end.node_id 
+      AND start.node_id < end.node_id
+    WITH path, start, end
+    ORDER BY start.node_index, end.node_index, start.node_id, end.node_id
+    RETURN path
+    LIMIT 8
+
+    UNION
+
+    MATCH path = (start:PrimeKGNode)-[r1]->(n1:PrimeKGNode)-[r2]->(n2:PrimeKGNode)-[r3]->(n3:PrimeKGNode)-[r4]->(n4:PrimeKGNode)-[r5]->(end:PrimeKGNode)
+    WHERE start.node_id <> end.node_id 
+      AND start.node_id > end.node_id
+      AND start.node_type = 'disease'
+    WITH path, start, end
+    ORDER BY start.node_index, end.node_index, start.node_id, end.node_id
+    RETURN path
+    LIMIT 4
+
+    UNION
+
+    MATCH path = (start:PrimeKGNode)-[r1]->(n1:PrimeKGNode)-[r2]->(n2:PrimeKGNode)-[r3]->(n3:PrimeKGNode)-[r4]->(n4:PrimeKGNode)-[r5]->(end:PrimeKGNode)
+    WHERE start.node_id <> end.node_id 
+      AND start.node_type = 'drug'
+      AND end.node_type = 'disease'
+    WITH path, start, end
+    ORDER BY start.node_index, end.node_index, start.node_id, end.node_id
+    RETURN path
+    LIMIT 4
+    """
     
-    graph = load_graph_from_neo4j(
-        neo4j_uri=neo4j_uri,
-        neo4j_user=neo4j_user,
-        neo4j_password=neo4j_password,
-        database=database,
-        exclude_edge_types=exclude_edges,
-        limit_nodes=limit_nodes,
-    )
+    context.log.info("Using 5-hop paths query for graph construction...")
+    context.log.info(f"Query:\n{five_hop_query}")
+    
+    # Execute the 5-hop paths query to build NetworkX graph
+    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    graph = nx.Graph()
+    paths_data = []
+    
+    with driver.session(database=database) as session:
+        result = session.run(five_hop_query)
+        
+        for record in result:
+            path = record["path"]
+            
+            # Add nodes to graph
+            for node in path.nodes:
+                node_id = str(node.get("node_id"))
+                graph.add_node(node_id, **{
+                    "node_name": node.get("node_name"),
+                    "node_type": node.get("node_type"),
+                    "node_source": node.get("node_source"),
+                    "node_index": node.get("node_index")
+                })
+            
+            # Add relationships to graph
+            for rel in path.relationships:
+                source_id = str(rel.start_node.get("node_id"))
+                target_id = str(rel.end_node.get("node_id"))
+                
+                # Skip excluded edge types
+                if rel.type not in exclude_edges:
+                    graph.add_edge(source_id, target_id, **{
+                        "relationship_type": rel.type,
+                        "display_relation": rel.get("display_relation")
+                    })
+            
+            # Store path data for metadata
+            path_info = {
+                "start_node": path.nodes[0].get("node_name"),
+                "end_node": path.nodes[-1].get("node_name"),
+                "start_type": path.nodes[0].get("node_type"),
+                "end_type": path.nodes[-1].get("node_type"),
+                "path_length": len(path.relationships)
+            }
+            paths_data.append(path_info)
+    
+    driver.close()
+    
+    # Create deterministic checksum for reproducibility
+    node_ids_str = "|".join(sorted(graph.nodes()))
+    checksum = hashlib.md5(node_ids_str.encode()).hexdigest()
+    
+    context.log.info("Built NetworkX graph from 5-hop paths")
+    context.log.info(f"Graph checksum: {checksum}")
     
     context.add_output_metadata({
         "num_nodes": graph.number_of_nodes(),
         "num_edges": graph.number_of_edges(),
         "excluded_edge_types": exclude_edges,
         "clinical_validation_complete": True,
-        "limit_nodes": limit_nodes,
-        "is_testing": True,
+        "query_type": "5-hop paths",
+        "total_paths_found": len(paths_data),
+        "graph_checksum": checksum,
+        "deterministic_ordering": True,
+        "sample_paths": paths_data[:3] if paths_data else [],  # Show first 3 paths
     })
     
     return graph

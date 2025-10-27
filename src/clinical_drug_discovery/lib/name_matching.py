@@ -307,7 +307,10 @@ class PrimeKGNameMatcher:
                 stats['total_dropped'] += 1
                 print(f"  Dropped: {drug_name} -> {disease_name} (drug_match: {bool(drug_id)}, disease_match: {bool(disease_id)})")
         
-        normalized_df = pd.DataFrame(normalized_pairs)
+        # Create DataFrame with explicit columns to handle empty case
+        normalized_df = pd.DataFrame(normalized_pairs, columns=[
+            'drug_id', 'disease_id', 'score', 'original_drug_name', 'original_disease_name'
+        ])
         
         print(f"\nNormalization Results:")
         print(f"  Total pairs: {stats['total_pairs']}")
