@@ -5,6 +5,7 @@ Dagster assets for loading PrimeKG data into Neo4j.
 import os
 from typing import Any, Dict
 
+import mlflow
 import pandas as pd
 from dagster import AssetExecutionContext, asset
 from dotenv import load_dotenv
@@ -142,17 +143,35 @@ def disease_features_loaded(
     """Load disease features into Neo4j."""
     context.log.info("Loading disease features...")
 
-    # Read disease features from drug_features.csv (tab-separated)
-    # Note: Harvard Dataverse file naming is swapped - drug_features.csv contains disease features
-    disease_features_df = pd.read_csv("data/01_raw/primekg/drug_features.csv", sep='\t')
+    # Set MLflow experiment
+    mlflow.set_experiment("clinical-drug-discovery")
 
-    result = load_disease_features_to_neo4j(
-        disease_features_df=disease_features_df,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-    )
+    with mlflow.start_run(run_name="data_loading"):
+        # Read disease features from drug_features.csv (tab-separated)
+        # Note: Harvard Dataverse file naming is swapped - drug_features.csv contains disease features
+        disease_features_df = pd.read_csv("data/01_raw/primekg/drug_features.csv", sep='\t')
 
-    context.log.info(f"Loaded {result['disease_features_processed']} disease features")
+        # Log parameters
+        mlflow.log_params({
+            "database": os.getenv("NEO4J_DATABASE"),
+            "data_source": "PrimeKG",
+        })
+
+        result = load_disease_features_to_neo4j(
+            disease_features_df=disease_features_df,
+            neo4j_uri=os.getenv("NEO4J_URI"),
+            neo4j_user=os.getenv("NEO4J_USER"),
+            neo4j_password=os.getenv("NEO4J_PASSWORD"),
+            database=os.getenv("NEO4J_DATABASE"),
+        )
+
+        # Log metrics to MLflow
+        mlflow.log_metrics({
+            "nodes_loaded": primekg_edges_loaded.get("edges_in_db", 0),
+            "disease_features_processed": result.get("disease_features_processed", 0),
+        })
+
+        context.log.info(f"Loaded {result['disease_features_processed']} disease features")
+        context.log.info(f"MLflow run ID: {mlflow.active_run().info.run_id}")
+
     return result

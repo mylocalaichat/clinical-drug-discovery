@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Dict
 
+import mlflow
 import pandas as pd
 from dagster import AssetExecutionContext, MetadataValue, asset
 
@@ -31,30 +32,65 @@ def mtsamples_raw(context: AssetExecutionContext) -> pd.DataFrame:
 def clinical_drug_disease_pairs(
     context: AssetExecutionContext,
     mtsamples_raw: pd.DataFrame,
+    drug_features_loaded: Dict,  # Ensure drugs are loaded in Neo4j
+    disease_features_loaded: Dict,  # Ensure diseases are loaded in Neo4j
 ) -> pd.DataFrame:
     """Extract and normalize drug-disease co-occurrences using scispaCy NER."""
     context.log.info("Extracting and normalizing drug-disease pairs using NER...")
+    
+    # Log that data loading is complete
+    context.log.info(f"Data loading complete - drugs: {len(drug_features_loaded)} entities, diseases: {len(disease_features_loaded)} entities")
 
-    result, stats = extract_and_normalize_drug_disease_pairs(
-        notes_df=mtsamples_raw,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-        ner_model="en_ner_bc5cdr_md",
-        min_frequency=1,  # Lowered from 2 to see if we get any pairs at all
-        max_note_length=10000,
-    )
+    # Set MLflow experiment
+    mlflow.set_experiment("clinical-drug-discovery")
 
-    context.log.info(f"Extracted and normalized {len(result):,} drug-disease pairs")
+    with mlflow.start_run(run_name="clinical_extraction"):
+        # Log parameters
+        mlflow.log_params({
+            "ner_model": "en_ner_bc5cdr_md",
+            "min_frequency": 1,
+            "max_note_length": 10000,
+            "num_input_notes": len(mtsamples_raw),
+        })
 
-    # Save to CSV for inspection
-    output_file = "data/03_primary/clinical_drug_disease_pairs.csv"
-    result.to_csv(output_file, index=False)
+        result, stats = extract_and_normalize_drug_disease_pairs(
+            notes_df=mtsamples_raw,
+            neo4j_uri=os.getenv("NEO4J_URI"),
+            neo4j_user=os.getenv("NEO4J_USER"),
+            neo4j_password=os.getenv("NEO4J_PASSWORD"),
+            database=os.getenv("NEO4J_DATABASE"),
+            ner_model="en_ner_bc5cdr_md",
+            min_frequency=1,
+            max_note_length=10000,
+        )
 
-    # Get absolute path for display
-    output_path = Path(output_file).resolve()
-    context.log.info(f"Saved to: {output_path}")
+        context.log.info(f"Extracted and normalized {len(result):,} drug-disease pairs")
+
+        # Log metrics to MLflow
+        mlflow.log_metrics({
+            "num_extracted_pairs": len(result),
+            "num_unique_drugs": result['drug_name'].nunique() if len(result) > 0 else 0,
+            "num_unique_diseases": result['disease_name'].nunique() if len(result) > 0 else 0,
+        })
+
+        # Log extraction stats
+        if "extraction_stats" in stats:
+            mlflow.log_metrics({
+                f"extraction_{k}": v for k, v in stats["extraction_stats"].items()
+                if isinstance(v, (int, float))
+            })
+
+        # Save to CSV for inspection
+        output_file = "data/03_primary/clinical_drug_disease_pairs.csv"
+        result.to_csv(output_file, index=False)
+
+        # Log artifact to MLflow
+        mlflow.log_artifact(output_file)
+
+        # Get absolute path for display
+        output_path = Path(output_file).resolve()
+        context.log.info(f"Saved to: {output_path}")
+        context.log.info(f"MLflow run ID: {mlflow.active_run().info.run_id}")
 
     # Add metadata to show in Dagster UI
     context.add_output_metadata({
