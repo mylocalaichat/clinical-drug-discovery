@@ -28,7 +28,7 @@ from .embeddings import (
     node2vec_embeddings,
     saved_embeddings,
 )
-from .graph_enrichment import clinical_enrichment_stats, clinical_validation_stats
+from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
 
 # TODO: Enable link prediction assets after installing OpenMP (brew install libomp)
 # from .link_prediction import (
@@ -57,7 +57,7 @@ __all__ = [
     "clinical_drug_disease_pairs",
     "clinical_extraction_stats",
     # Graph Enrichment
-    "clinical_enrichment_stats",
+    "clinical_pairs_loaded",
     "clinical_validation_stats",
     # Drug Discovery
     "drug_discovery_results",

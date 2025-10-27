@@ -32,7 +32,7 @@ TEST_DISEASES = [
 def drug_discovery_results(
     context: AssetExecutionContext,
     clinical_validation_stats: Dict,
-    clinical_enrichment_stats: Dict,
+    clinical_pairs_loaded: Dict,
 ) -> pd.DataFrame:
     """Run drug discovery for multiple diseases and aggregate results."""
     context.log.info("Running drug discovery queries...")
@@ -73,7 +73,7 @@ def drug_discovery_results(
             base_results=base_results,
             enhanced_results=enhanced_results,
             comparison=comparison,
-            clinical_enrichment_stats=clinical_enrichment_stats,
+            clinical_enrichment_stats=clinical_pairs_loaded,
             clinical_validation_stats=clinical_validation_stats,
         )
 

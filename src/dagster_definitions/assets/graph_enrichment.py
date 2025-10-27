@@ -20,14 +20,14 @@ load_dotenv()
 
 
 @asset(group_name="graph_enrichment", compute_kind="neo4j")
-def clinical_enrichment_stats(
+def clinical_pairs_loaded(
     context: AssetExecutionContext,
     clinical_drug_disease_pairs: pd.DataFrame,
     disease_features_loaded: Dict,
     drug_features_loaded: Dict,
 ) -> Dict[str, int]:
-    """Add CLINICAL_EVIDENCE relationships to Neo4j graph."""
-    context.log.info("Adding clinical evidence to Neo4j...")
+    """Load clinical drug-disease pairs as CLINICAL_EVIDENCE relationships into Neo4j graph."""
+    context.log.info("Loading clinical evidence pairs into Neo4j...")
 
     # Set MLflow experiment
     mlflow.set_experiment("clinical-drug-discovery")
@@ -56,7 +56,7 @@ def clinical_enrichment_stats(
         })
 
         context.log.info(
-            f"Added {result['clinical_relationships_added']} clinical evidence relationships"
+            f"Loaded {result['clinical_relationships_added']} clinical evidence relationships into Neo4j"
         )
         context.log.info(f"MLflow run ID: {mlflow.active_run().info.run_id}")
 
@@ -66,7 +66,7 @@ def clinical_enrichment_stats(
 @asset(group_name="graph_enrichment", compute_kind="neo4j")
 def clinical_validation_stats(
     context: AssetExecutionContext,
-    clinical_enrichment_stats: Dict,
+    clinical_pairs_loaded: Dict,
 ) -> Dict[str, int]:
     """Validate clinical evidence relationships in Neo4j."""
     context.log.info("Validating clinical evidence...")
