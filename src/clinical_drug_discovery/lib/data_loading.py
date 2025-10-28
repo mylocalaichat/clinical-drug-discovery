@@ -266,6 +266,13 @@ def bulk_load_nodes_to_memgraph(
         print(f"Starting bulk node loading: {len(nodes_df):,} nodes in batches of {batch_size}")
         
         with driver.session() as session:
+            # Create index for faster lookups
+            try:
+                session.run("CREATE INDEX ON :Node(node_id)")
+                print("✓ Created index on Node(node_id)")
+            except Exception as e:
+                print(f"Index may already exist: {e}")
+            
             for i in range(0, len(nodes_df), batch_size):
                 batch_start = time.time()
                 batch = nodes_df.iloc[i:i+batch_size]
@@ -282,30 +289,51 @@ def bulk_load_nodes_to_memgraph(
                             "node_source": row["node_source"]
                         })
                     
-                    # Use UNWIND for bulk insert with proper transaction management
+                    # Use CREATE instead of MERGE for better performance (assumes clean database)
                     bulk_query = """
                     UNWIND $batch_data AS node_data
-                    MERGE (n:Node {node_id: node_data.node_id})
-                    SET n.node_index = node_data.node_index,
-                        n.node_type = node_data.node_type,
-                        n.node_name = node_data.node_name,
-                        n.node_source = node_data.node_source
+                    CREATE (n:Node {
+                        node_id: node_data.node_id,
+                        node_index: node_data.node_index,
+                        node_type: node_data.node_type,
+                        node_name: node_data.node_name,
+                        node_source: node_data.node_source
+                    })
                     """
                     
-                    # Execute with timeout and transaction management
-                    session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                    # Retry logic: attempt up to 3 times
+                    max_retries = 3
+                    retry_count = 0
+                    batch_successful = False
                     
-                    total_loaded += len(batch)
-                    batch_time = time.time() - batch_start
-                    
-                    print(
-                        f"✓ Batch {i//batch_size + 1}: {total_loaded:,}/{len(nodes_df):,} nodes "
-                        f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} nodes/sec)"
-                    )
+                    while retry_count < max_retries and not batch_successful:
+                        try:
+                            # Execute with timeout and transaction management
+                            session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                            batch_successful = True
+                            
+                            total_loaded += len(batch)
+                            batch_time = time.time() - batch_start
+                            
+                            retry_msg = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(
+                                f"✓ Batch {i//batch_size + 1}{retry_msg}: {total_loaded:,}/{len(nodes_df):,} nodes "
+                                f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} nodes/sec)"
+                            )
+                            
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                print(f"⚠️  Batch {i//batch_size + 1} failed (attempt {retry_count}), retrying: {e}")
+                                time.sleep(2 ** retry_count)  # Exponential backoff: 2s, 4s, 8s
+                            else:
+                                failed_batches += 1
+                                print(f"✗ Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}")
+                                break
                     
                 except Exception as e:
                     failed_batches += 1
-                    print(f"✗ Failed batch {i//batch_size + 1}: {e}")
+                    print(f"✗ Critical error in batch {i//batch_size + 1}: {e}")
                     # Continue with next batch rather than failing completely
                     continue
         
@@ -356,7 +384,6 @@ def bulk_load_edges_to_memgraph(
     Returns:
         Dictionary with loading statistics
     """
-    import time
     from neo4j import GraphDatabase
     
     # Handle empty credentials for local Memgraph
@@ -389,29 +416,50 @@ def bulk_load_edges_to_memgraph(
                             "display_relation": row["display_relation"]
                         })
                     
-                    # Use UNWIND for bulk relationship creation with proper transaction management
+                    # Optimized bulk relationship creation - uses CREATE for performance
                     bulk_query = """
                     UNWIND $batch_data AS edge_data
                     MATCH (x:Node {node_id: edge_data.x_id})
                     MATCH (y:Node {node_id: edge_data.y_id})
-                    MERGE (x)-[r:RELATES {relation: edge_data.relation}]->(y)
-                    SET r.display_relation = edge_data.display_relation
+                    CREATE (x)-[r:RELATES {
+                        relation: edge_data.relation,
+                        display_relation: edge_data.display_relation
+                    }]->(y)
                     """
                     
-                    # Execute with timeout and transaction management
-                    session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                    # Retry logic: attempt up to 3 times
+                    max_retries = 3
+                    retry_count = 0
+                    batch_successful = False
                     
-                    total_loaded += len(batch)
-                    batch_time = time.time() - batch_start
-                    
-                    print(
-                        f"✓ Batch {i//batch_size + 1}: {total_loaded:,}/{len(edges_df):,} edges "
-                        f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} edges/sec)"
-                    )
+                    while retry_count < max_retries and not batch_successful:
+                        try:
+                            # Execute with timeout and transaction management
+                            session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                            batch_successful = True
+                            
+                            total_loaded += len(batch)
+                            batch_time = time.time() - batch_start
+                            
+                            retry_msg = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(
+                                f"✓ Batch {i//batch_size + 1}{retry_msg}: {total_loaded:,}/{len(edges_df):,} edges "
+                                f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} edges/sec)"
+                            )
+                            
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                print(f"⚠️  Batch {i//batch_size + 1} failed (attempt {retry_count}), retrying: {e}")
+                                time.sleep(2 ** retry_count)  # Exponential backoff: 2s, 4s, 8s
+                            else:
+                                failed_batches += 1
+                                print(f"✗ Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}")
+                                break
                     
                 except Exception as e:
                     failed_batches += 1
-                    print(f"✗ Failed batch {i//batch_size + 1}: {e}")
+                    print(f"✗ Critical error in batch {i//batch_size + 1}: {e}")
                     # Continue with next batch rather than failing completely
                     continue
         

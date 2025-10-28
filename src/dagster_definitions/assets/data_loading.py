@@ -34,8 +34,40 @@ def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
 
 @asset(group_name="data_loading", compute_kind="database")
 def memgraph_database_ready(context: AssetExecutionContext, primekg_download_status: Dict) -> Dict[str, str]:
-    """Setup Memgraph database."""
+    """Setup Memgraph database and clear all existing data."""
+    from neo4j import GraphDatabase
+    
     context.log.info("Setting up Memgraph database...")
+    
+    # Connect to Memgraph and delete all existing nodes and edges
+    auth = None
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+    
+    try:
+        with driver.session() as session:
+            context.log.info("Deleting all existing nodes and edges...")
+            
+            # Delete all relationships first
+            result = session.run("MATCH ()-[r]->() DELETE r")
+            context.log.info("Deleted all relationships")
+            
+            # Then delete all nodes
+            result = session.run("MATCH (n) DELETE n")
+            context.log.info("Deleted all nodes")
+            
+            # Verify cleanup
+            node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
+            edge_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()["count"]
+            
+            context.log.info(f"Database cleanup complete - Nodes: {node_count}, Edges: {edge_count}")
+            
+    finally:
+        driver.close()
 
     result = setup_memgraph_database(
         memgraph_uri=os.getenv("MEMGRAPH_URI"),
@@ -74,8 +106,8 @@ def primekg_nodes_loaded(
         memgraph_uri=os.getenv("MEMGRAPH_URI"),
         memgraph_user=os.getenv("MEMGRAPH_USER", ""),
         memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
-        batch_size=5000,  # Optimized for 50k+ nodes
-        timeout=300  # 5 minute timeout per batch
+        batch_size=10000,  # Increased from 50000 for better memory management
+        timeout=600  # Increased to 10 minutes for large batches
     )
 
     context.log.info(
@@ -118,8 +150,8 @@ def primekg_edges_loaded(
         memgraph_uri=os.getenv("MEMGRAPH_URI"),
         memgraph_user=os.getenv("MEMGRAPH_USER", ""),
         memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
-        batch_size=5000,  # Optimized for large datasets
-        timeout=300  # 5 minute timeout per batch
+        batch_size=10000,  # Increased from 5000 for better performance
+        timeout=600  # Increased to 10 minutes for large batches
     )
 
     context.log.info(
