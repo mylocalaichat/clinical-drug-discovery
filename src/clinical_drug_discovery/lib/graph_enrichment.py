@@ -11,33 +11,33 @@ from tqdm import tqdm
 
 def add_clinical_evidence_to_graph(
     clinical_pairs: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
+    database: str = "memgraph",
     min_score: float = 0.1,
 ) -> Dict[str, int]:
     """
-    Add CLINICAL_EVIDENCE relationships to Neo4j graph.
+    Add CLINICAL_EVIDENCE relationships to Memgraph.
 
     Args:
         clinical_pairs: DataFrame with columns: drug_id, disease_id, score (normalized node IDs)
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
         min_score: Minimum score to create relationship (0.1 means only positive associations)
 
     Returns:
         Dictionary with enrichment statistics
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
 
     added = 0
     skipped = 0
 
     try:
-        print(f"\nAdding clinical evidence to Neo4j...")
+        print("\nAdding clinical evidence to Memgraph...")
         print(f"Total pairs to process: {len(clinical_pairs):,}")
         print(f"Minimum score threshold: {min_score}")
 
@@ -107,24 +107,24 @@ def add_clinical_evidence_to_graph(
 
 
 def validate_clinical_evidence(
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
+    database: str = "memgraph",
 ) -> Dict[str, int]:
     """
-    Validate clinical evidence relationships in Neo4j.
+    Validate clinical evidence relationships in Memgraph.
 
     Args:
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
 
     Returns:
         Dictionary with validation statistics
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
 
     try:
         with driver.session(database=database) as session:

@@ -10,7 +10,7 @@ from .clinical_extraction import (
 from .data_loading import (
     disease_features_loaded,
     drug_features_loaded,
-    neo4j_database_ready,
+    memgraph_database_ready,
     primekg_download_status,
     primekg_edges_loaded,
     primekg_nodes_loaded,
@@ -47,7 +47,7 @@ from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
 __all__ = [
     # Data Loading
     "primekg_download_status",
-    "neo4j_database_ready",
+    "memgraph_database_ready",
     "primekg_nodes_loaded",
     "primekg_edges_loaded",
     "drug_features_loaded",

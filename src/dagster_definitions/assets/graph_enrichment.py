@@ -41,10 +41,10 @@ def clinical_pairs_loaded(
 
         result = add_clinical_evidence_to_graph(
             clinical_pairs=clinical_drug_disease_pairs,
-            neo4j_uri=os.getenv("NEO4J_URI"),
-            neo4j_user=os.getenv("NEO4J_USER"),
-            neo4j_password=os.getenv("NEO4J_PASSWORD"),
-            database=os.getenv("NEO4J_DATABASE"),
+            memgraph_uri=os.getenv("MEMGRAPH_URI"),
+            memgraph_user=os.getenv("MEMGRAPH_USER"),
+            memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+            database=os.getenv("MEMGRAPH_DATABASE"),
             min_score=0.1,
         )
 
@@ -72,10 +72,10 @@ def clinical_validation_stats(
     context.log.info("Validating clinical evidence...")
 
     result = validate_clinical_evidence(
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER"),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+        database=os.getenv("MEMGRAPH_DATABASE"),
     )
 
     context.log.info(f"Validation: {result['total_clinical_evidence']} relationships found")

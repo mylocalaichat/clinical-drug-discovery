@@ -354,9 +354,9 @@ def get_extraction_stats(clinical_pairs_df: pd.DataFrame) -> Dict[str, int]:
 
 def extract_and_normalize_drug_disease_pairs(
     notes_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
     database: str = "primekg",
     ner_model: str = "en_ner_bc5cdr_md",
     min_frequency: int = 2,
@@ -367,9 +367,9 @@ def extract_and_normalize_drug_disease_pairs(
     
     Args:
         notes_df: DataFrame with clinical notes
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
         ner_model: Name of spaCy NER model to use
         min_frequency: Minimum frequency for a pair to be included
@@ -397,7 +397,7 @@ def extract_and_normalize_drug_disease_pairs(
     
     # Step 2: Normalize names to PrimeKG node IDs
     print(f"\nStep 2: Normalizing {len(raw_pairs)} pairs to PrimeKG node IDs...")
-    name_matcher = create_name_matcher(neo4j_uri, neo4j_user, neo4j_password, database)
+    name_matcher = create_name_matcher(memgraph_uri, memgraph_user, memgraph_password, database)
     normalized_pairs, normalization_stats = name_matcher.normalize_clinical_pairs(raw_pairs)
     
     # Step 3: Get extraction stats

@@ -40,10 +40,10 @@ def knowledge_graph(
     context.log.info(f"Clinical validation completed with {len(clinical_validation_stats)} metrics")
     
     # Get Neo4j connection details from environment
-    neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_password = os.getenv("NEO4J_PASSWORD", "neo4j")
-    database = os.getenv("NEO4J_DATABASE", "primekg")
+    memgraph_uri = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+    database = os.getenv("MEMGRAPH_DATABASE", "memgraph")
     
     # Exclude INDICATION edges to prevent data leakage in link prediction
     exclude_edges = ["INDICATION", "CONTRAINDICATION"]
@@ -85,7 +85,7 @@ def knowledge_graph(
     context.log.info(f"Query:\n{five_hop_query}")
     
     # Execute the 5-hop paths query to build NetworkX graph
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
     graph = nx.Graph()
     paths_data = []
     

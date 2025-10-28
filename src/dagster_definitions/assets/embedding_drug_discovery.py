@@ -112,10 +112,10 @@ def embedding_enhanced_drug_discovery(
         # Get base results from traditional graph query
         base_results = query_base_drug_discovery(
             disease_id=disease_id,
-            neo4j_uri=os.getenv("NEO4J_URI"),
-            neo4j_user=os.getenv("NEO4J_USER"),
-            neo4j_password=os.getenv("NEO4J_PASSWORD"),
-            database=os.getenv("NEO4J_DATABASE"),
+            memgraph_uri=os.getenv("MEMGRAPH_URI"),
+            memgraph_user=os.getenv("MEMGRAPH_USER"),
+            memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+            database=os.getenv("MEMGRAPH_DATABASE"),
         )
         
         if len(base_results) == 0:

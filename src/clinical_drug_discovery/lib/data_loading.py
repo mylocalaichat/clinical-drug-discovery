@@ -1,5 +1,5 @@
 """
-Data loading utilities for PrimeKG dataset.
+Data loading utilities for PrimeKG dataset with Memgraph.
 """
 
 import os
@@ -10,7 +10,80 @@ from typing import Dict
 
 import pandas as pd
 from neo4j import GraphDatabase
-from tqdm import tqdm
+
+
+def get_database_session(driver, database: str = None):
+    """
+    Create a database session for Memgraph.
+    The database parameter is ignored since Memgraph uses a single database.
+    """
+    return driver.session()
+
+
+def setup_memgraph_database(
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    database: str = "memgraph",
+    fresh_start: bool = True,
+) -> Dict[str, str]:
+    """
+    Setup Memgraph database (clear all data if fresh_start=True).
+
+    Args:
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username (often empty for local)
+        memgraph_password: Memgraph password (often empty for local)
+        database: Database name (ignored for Memgraph)
+        fresh_start: If True, clear all data
+
+    Returns:
+        Dictionary with database status
+    """
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+
+    try:
+        print("Connecting to Memgraph...")
+        
+        if fresh_start:
+            print("Clearing all data from Memgraph...")
+            with driver.session() as session:
+                try:
+                    # First try to get a count of existing data
+                    result = session.run("MATCH (n) RETURN count(n) as count LIMIT 1")
+                    node_count = result.single()['count']
+                    print(f"Found {node_count:,} nodes in database")
+                    
+                    if node_count > 0:
+                        print("Clearing all nodes and relationships...")
+                        session.run("MATCH (n) DETACH DELETE n", timeout=300)  # 5 minute timeout
+                        print("✓ All data cleared from Memgraph")
+                    else:
+                        print("✓ Memgraph is already empty")
+                        
+                except Exception as e:
+                    print(f"Warning: Could not clear existing data: {e}")
+                    print("Continuing anyway - this might be okay if database is empty")
+
+        # Test final connection
+        print("Testing Memgraph connection...")
+        with driver.session() as session:
+            session.run("RETURN 1")
+            print("✓ Memgraph is ready!")
+
+        return {
+            "status": "ready",
+            "database": "memgraph",
+            "database_type": "memgraph"
+        }
+
+    finally:
+        driver.close()
 
 
 def download_primekg_data(download_dir: str) -> Dict[str, str]:
@@ -115,71 +188,6 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
     }
 
 
-def setup_neo4j_database(
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-    fresh_start: bool = True,
-) -> Dict[str, str]:
-    """
-    Setup Neo4j database (drop and recreate if fresh_start=True).
-
-    Args:
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-        fresh_start: If True, drop and recreate database
-
-    Returns:
-        Dictionary with database status
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        with driver.session(database="system") as session:
-            # Check if database exists
-            result = session.run("SHOW DATABASES")
-            databases = [record["name"] for record in result]
-
-            if fresh_start and database in databases:
-                print(f"Dropping existing database '{database}'...")
-                try:
-                    session.run(f"STOP DATABASE `{database}`")
-                except Exception as e:
-                    print(f"Note: {e}")
-
-                session.run(f"DROP DATABASE `{database}` IF EXISTS")
-                print(f"Dropped database '{database}'")
-
-            # Create database if it doesn't exist
-            if database not in databases or fresh_start:
-                print(f"Creating database '{database}'...")
-                session.run(f"CREATE DATABASE `{database}`")
-                print(f"Database '{database}' created successfully!")
-
-        # Wait for database to be ready
-        print("Waiting for database to be ready...")
-        max_retries = 30
-        for i in range(max_retries):
-            try:
-                with driver.session(database=database) as session:
-                    session.run("RETURN 1")
-                    print("Database is ready!")
-                    break
-            except Exception as e:
-                if i < max_retries - 1:
-                    time.sleep(1)
-                else:
-                    raise Exception(
-                        f"Database did not become ready after {max_retries} seconds: {e}"
-                    )
-
-        return {"status": "success", "database": database, "action": "created" if fresh_start else "verified"}
-
-    finally:
-        driver.close()
 
 
 def extract_nodes_from_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
@@ -215,269 +223,4 @@ def extract_nodes_from_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
     return unique_nodes
 
 
-def load_nodes_to_neo4j(
-    nodes_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load nodes from DataFrame into Neo4j.
 
-    Args:
-        nodes_df: DataFrame with columns: node_index, node_id, node_type, node_name, node_source
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal nodes to load: {len(nodes_df):,}")
-        print("\nNode types distribution:")
-        print(nodes_df['node_type'].value_counts())
-
-        with driver.session(database=database) as session:
-            # Create indices
-            print("\nCreating indices...")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_index)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_id)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_type)")
-
-            # Load nodes in batches
-            batch_size = 50000
-            total_processed = 0
-            print("\nLoading nodes in batches...")
-
-            for i in tqdm(range(0, len(nodes_df), batch_size)):
-                batch = nodes_df.iloc[i : i + batch_size]
-
-                query = """
-                UNWIND $rows AS row
-                MERGE (n:PrimeKGNode {node_index: row.node_index})
-                SET n.node_id = row.node_id,
-                    n.node_type = row.node_type,
-                    n.node_name = row.node_name,
-                    n.node_source = row.node_source
-                """
-                result = session.run(query, {"rows": batch.to_dict("records")})
-                result.consume()
-                total_processed += len(batch)
-
-            # Get final count
-            result = session.run("MATCH (n:PrimeKGNode) RETURN count(n) as count").single()
-            final_count = result['count']
-            print(f"\nTotal nodes loaded: {final_count:,}")
-
-            return {
-                "nodes_processed": total_processed,
-                "nodes_in_db": final_count
-            }
-
-    finally:
-        driver.close()
-
-
-def load_edges_to_neo4j(
-    edges_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load edges from DataFrame into Neo4j.
-
-    Args:
-        edges_df: DataFrame with columns: x_index, y_index, relation, display_relation
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal edges to load: {len(edges_df):,}")
-        print("\nRelation types distribution:")
-        print(edges_df['relation'].value_counts())
-
-        total_processed = 0
-        relation_types = edges_df['relation'].unique()
-        print(f"\nFound {len(relation_types)} unique relationship types")
-
-        for rel_type in tqdm(relation_types, desc="Relationship types"):
-            rel_edges = edges_df[edges_df['relation'] == rel_type]
-            neo4j_rel_type = rel_type.upper().replace("-", "_").replace(" ", "_")
-
-            batch_size = 5000
-            for i in range(0, len(rel_edges), batch_size):
-                batch = rel_edges.iloc[i : i + batch_size]
-
-                with driver.session(database=database) as session:
-                    query = f"""
-                    UNWIND $rows AS row
-                    MATCH (source:PrimeKGNode {{node_index: row.x_index}})
-                    MATCH (target:PrimeKGNode {{node_index: row.y_index}})
-                    MERGE (source)-[r:`{neo4j_rel_type}`]->(target)
-                    SET r.display_relation = row.display_relation
-                    """
-                    result = session.run(query, {"rows": batch.to_dict("records")})
-                    result.consume()
-                    total_processed += len(batch)
-
-        # Get final count
-        with driver.session(database=database) as session:
-            result = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()
-            final_count = result['count']
-            print(f"\nTotal edges loaded: {final_count:,}")
-
-        return {
-            "edges_processed": total_processed,
-            "edges_in_db": final_count
-        }
-
-    finally:
-        driver.close()
-
-
-def load_drug_features_to_neo4j(
-    drug_features_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load drug features and attach to existing drug nodes.
-
-    Args:
-        drug_features_df: DataFrame with drug feature columns
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal drug features to load: {len(drug_features_df):,}")
-
-        with driver.session(database=database) as session:
-            batch_size = 1000
-            total_processed = 0
-
-            print("\nAttaching drug features to nodes...")
-            for i in tqdm(range(0, len(drug_features_df), batch_size)):
-                batch = drug_features_df.iloc[i : i + batch_size]
-                batch_dict = batch.where(pd.notnull(batch), None).to_dict("records")
-
-                query = """
-                UNWIND $rows AS row
-                MATCH (n:PrimeKGNode {node_index: row.node_index, node_type: 'drug'})
-                SET n.description = row.description,
-                    n.half_life = row.half_life,
-                    n.indication = row.indication,
-                    n.mechanism_of_action = row.mechanism_of_action,
-                    n.protein_binding = row.protein_binding,
-                    n.pharmacodynamics = row.pharmacodynamics,
-                    n.state = row.state,
-                    n.atc_1 = row.atc_1,
-                    n.atc_2 = row.atc_2,
-                    n.atc_3 = row.atc_3,
-                    n.atc_4 = row.atc_4,
-                    n.category = row.category,
-                    n.group = row.group,
-                    n.pathway = row.pathway,
-                    n.molecular_weight = row.molecular_weight,
-                    n.tpsa = row.tpsa,
-                    n.clogp = row.clogp
-                """
-                result = session.run(query, {"rows": batch_dict})
-                result.consume()
-                total_processed += len(batch)
-
-            print(f"\nTotal drug features loaded: {total_processed:,}")
-
-            return {"drug_features_processed": total_processed}
-
-    finally:
-        driver.close()
-
-
-def load_disease_features_to_neo4j(
-    disease_features_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load disease features and attach to existing disease nodes.
-
-    Args:
-        disease_features_df: DataFrame with disease feature columns
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal disease features to load: {len(disease_features_df):,}")
-
-        with driver.session(database=database) as session:
-            batch_size = 1000
-            total_processed = 0
-
-            print("\nAttaching disease features to nodes...")
-            for i in tqdm(range(0, len(disease_features_df), batch_size)):
-                batch = disease_features_df.iloc[i : i + batch_size]
-                batch_dict = batch.where(pd.notnull(batch), None).to_dict("records")
-
-                query = """
-                UNWIND $rows AS row
-                MATCH (n:PrimeKGNode {node_index: row.node_index, node_type: 'disease'})
-                SET n.mondo_id = row.mondo_id,
-                    n.mondo_name = row.mondo_name,
-                    n.group_id_bert = row.group_id_bert,
-                    n.group_name_bert = row.group_name_bert,
-                    n.mondo_definition = row.mondo_definition,
-                    n.umls_description = row.umls_description,
-                    n.orphanet_definition = row.orphanet_definition,
-                    n.orphanet_prevalence = row.orphanet_prevalence,
-                    n.orphanet_epidemiology = row.orphanet_epidemiology,
-                    n.orphanet_clinical_description = row.orphanet_clinical_description,
-                    n.orphanet_management_and_treatment = row.orphanet_management_and_treatment,
-                    n.mayo_symptoms = row.mayo_symptoms,
-                    n.mayo_causes = row.mayo_causes,
-                    n.mayo_risk_factors = row.mayo_risk_factors,
-                    n.mayo_complications = row.mayo_complications,
-                    n.mayo_prevention = row.mayo_prevention,
-                    n.mayo_see_doc = row.mayo_see_doc
-                """
-                result = session.run(query, {"rows": batch_dict})
-                result.consume()
-                total_processed += len(batch)
-
-            print(f"\nTotal disease features loaded: {total_processed:,}")
-
-            return {"disease_features_processed": total_processed}
-
-    finally:
-        driver.close()

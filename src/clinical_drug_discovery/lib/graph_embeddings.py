@@ -19,9 +19,9 @@ from tqdm import tqdm
 
 
 def load_graph_from_neo4j(
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
     database: str = "primekg",
     exclude_edge_types: Optional[List[str]] = None,
     limit_nodes: Optional[int] = None,
@@ -31,9 +31,9 @@ def load_graph_from_neo4j(
     Load knowledge graph from Neo4j into NetworkX.
 
     Args:
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Username
-        neo4j_password: Password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Username
+        memgraph_password: Password
         database: Database name
         exclude_edge_types: Edge types to exclude (e.g., ['INDICATION'] to prevent leakage)
         limit_nodes: Limit number of nodes to load for testing (None for all nodes)
@@ -42,7 +42,7 @@ def load_graph_from_neo4j(
     Returns:
         NetworkX graph
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
 
     # Build edge type filter
     edge_filter = ""
