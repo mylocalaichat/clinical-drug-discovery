@@ -53,9 +53,8 @@ def primekg_nodes_loaded(
     context: AssetExecutionContext,
     memgraph_database_ready: Dict
 ) -> Dict[str, Any]:
-    """Load PrimeKG nodes into Memgraph by extracting unique nodes from edges."""
-    from neo4j import GraphDatabase
-    from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges
+    """Load PrimeKG nodes into Memgraph using optimized bulk loading operations."""
+    from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges, bulk_load_nodes_to_memgraph
 
     download_dir = "data/01_raw/primekg"
     edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
@@ -68,50 +67,33 @@ def primekg_nodes_loaded(
     nodes_df = extract_nodes_from_edges(edges_df)
     context.log.info(f"Extracted {len(nodes_df):,} unique nodes")
 
-    # Connect to Memgraph
-    auth = None
-    memgraph_user = os.getenv("MEMGRAPH_USER", "")
-    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
-    if memgraph_user or memgraph_password:
-        auth = (memgraph_user, memgraph_password)
+    # Use optimized bulk loading with proper transaction management
+    context.log.info("Starting optimized bulk node loading...")
+    loading_stats = bulk_load_nodes_to_memgraph(
+        nodes_df=nodes_df,
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER", ""),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
+        batch_size=5000,  # Optimized for 50k+ nodes
+        timeout=300  # 5 minute timeout per batch
+    )
 
-    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+    context.log.info(
+        f"Bulk loading complete: {loading_stats['loaded_nodes']:,}/{loading_stats['total_nodes']:,} nodes "
+        f"({loading_stats['success_rate']:.1f}% success rate) "
+        f"in {loading_stats['loading_time_seconds']}s "
+        f"at {loading_stats['loading_rate_nodes_per_second']} nodes/sec"
+    )
 
-    try:
-        with driver.session() as session:
-            # Load nodes in batches
-            batch_size = 1000
-            for i in range(0, len(nodes_df), batch_size):
-                batch = nodes_df.iloc[i:i+batch_size]
+    if loading_stats['failed_batches'] > 0:
+        context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
 
-                # Create nodes with MERGE to avoid duplicates
-                for _, row in batch.iterrows():
-                    session.run("""
-                        MERGE (n:Node {node_id: $node_id})
-                        SET n.node_index = $node_index,
-                            n.node_type = $node_type,
-                            n.node_name = $node_name,
-                            n.node_source = $node_source
-                    """, {
-                        "node_id": row["node_id"],
-                        "node_index": int(row["node_index"]),
-                        "node_type": row["node_type"],
-                        "node_name": row["node_name"],
-                        "node_source": row["node_source"]
-                    })
-
-                context.log.info(f"Loaded {min(i+batch_size, len(nodes_df)):,}/{len(nodes_df):,} nodes")
-
-        context.log.info(f"Successfully loaded {len(nodes_df):,} nodes into Memgraph")
-
-        return {
-            "nodes_count": len(nodes_df),
-            "node_types": nodes_df["node_type"].value_counts().to_dict(),
-            "download_dir": download_dir
-        }
-
-    finally:
-        driver.close()
+    return {
+        "nodes_count": loading_stats['loaded_nodes'],
+        "node_types": nodes_df["node_type"].value_counts().to_dict(),
+        "download_dir": download_dir,
+        **loading_stats  # Include all loading statistics
+    }
 
 
 @asset(group_name="data_loading", compute_kind="database")
@@ -119,8 +101,8 @@ def primekg_edges_loaded(
     context: AssetExecutionContext,
     primekg_nodes_loaded: Dict
 ) -> Dict[str, Any]:
-    """Load PrimeKG edges/relationships into Memgraph."""
-    from neo4j import GraphDatabase
+    """Load PrimeKG edges/relationships into Memgraph using optimized bulk loading operations."""
+    from clinical_drug_discovery.lib.data_loading import bulk_load_edges_to_memgraph
 
     download_dir = primekg_nodes_loaded["download_dir"]
     edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
@@ -129,48 +111,33 @@ def primekg_edges_loaded(
     edges_df = pd.read_csv(edges_file)
     context.log.info(f"Loaded {len(edges_df):,} edges")
 
-    # Connect to Memgraph
-    auth = None
-    memgraph_user = os.getenv("MEMGRAPH_USER", "")
-    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
-    if memgraph_user or memgraph_password:
-        auth = (memgraph_user, memgraph_password)
+    # Use optimized bulk loading with proper transaction management
+    context.log.info("Starting optimized bulk edge loading...")
+    loading_stats = bulk_load_edges_to_memgraph(
+        edges_df=edges_df,
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER", ""),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
+        batch_size=5000,  # Optimized for large datasets
+        timeout=300  # 5 minute timeout per batch
+    )
 
-    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+    context.log.info(
+        f"Bulk loading complete: {loading_stats['loaded_edges']:,}/{loading_stats['total_edges']:,} edges "
+        f"({loading_stats['success_rate']:.1f}% success rate) "
+        f"in {loading_stats['loading_time_seconds']}s "
+        f"at {loading_stats['loading_rate_edges_per_second']} edges/sec"
+    )
 
-    try:
-        with driver.session() as session:
-            # Load edges in batches
-            batch_size = 1000
-            for i in range(0, len(edges_df), batch_size):
-                batch = edges_df.iloc[i:i+batch_size]
+    if loading_stats['failed_batches'] > 0:
+        context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
 
-                for _, row in batch.iterrows():
-                    # Create relationship between nodes
-                    session.run("""
-                        MATCH (x:Node {node_id: $x_id})
-                        MATCH (y:Node {node_id: $y_id})
-                        MERGE (x)-[r:RELATES {relation: $relation}]->(y)
-                        SET r.display_relation = $display_relation
-                    """, {
-                        "x_id": row["x_id"],
-                        "y_id": row["y_id"],
-                        "relation": row["relation"],
-                        "display_relation": row["display_relation"]
-                    })
-
-                context.log.info(f"Loaded {min(i+batch_size, len(edges_df)):,}/{len(edges_df):,} edges")
-
-        context.log.info(f"Successfully loaded {len(edges_df):,} edges into Memgraph")
-
-        return {
-            "edges_count": len(edges_df),
-            "relation_types": edges_df["relation"].value_counts().to_dict(),
-            "download_dir": download_dir
-        }
-
-    finally:
-        driver.close()
+    return {
+        "edges_count": loading_stats['loaded_edges'],
+        "relation_types": edges_df["relation"].value_counts().to_dict(),
+        "download_dir": download_dir,
+        **loading_stats  # Include all loading statistics
+    }
 
 
 @asset(group_name="data_loading", compute_kind="database")

@@ -224,3 +224,217 @@ def extract_nodes_from_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+
+
+def bulk_load_nodes_to_memgraph(
+    nodes_df: pd.DataFrame,
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    batch_size: int = 5000,
+    timeout: int = 300
+) -> Dict[str, any]:
+    """
+    Efficiently load nodes into Memgraph using bulk operations with proper transaction management.
+    
+    Args:
+        nodes_df: DataFrame with columns: node_index, node_id, node_type, node_name, node_source
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
+        batch_size: Number of nodes to process per batch (default: 5000)
+        timeout: Transaction timeout in seconds (default: 300)
+        
+    Returns:
+        Dictionary with loading statistics
+    """
+    import time
+    from neo4j import GraphDatabase
+    
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    
+    try:
+        start_time = time.time()
+        total_loaded = 0
+        failed_batches = 0
+        
+        print(f"Starting bulk node loading: {len(nodes_df):,} nodes in batches of {batch_size}")
+        
+        with driver.session() as session:
+            for i in range(0, len(nodes_df), batch_size):
+                batch_start = time.time()
+                batch = nodes_df.iloc[i:i+batch_size]
+                
+                try:
+                    # Convert batch to list of dictionaries for bulk operation
+                    batch_data = []
+                    for _, row in batch.iterrows():
+                        batch_data.append({
+                            "node_id": row["node_id"],
+                            "node_index": int(row["node_index"]),
+                            "node_type": row["node_type"],
+                            "node_name": row["node_name"],
+                            "node_source": row["node_source"]
+                        })
+                    
+                    # Use UNWIND for bulk insert with proper transaction management
+                    bulk_query = """
+                    UNWIND $batch_data AS node_data
+                    MERGE (n:Node {node_id: node_data.node_id})
+                    SET n.node_index = node_data.node_index,
+                        n.node_type = node_data.node_type,
+                        n.node_name = node_data.node_name,
+                        n.node_source = node_data.node_source
+                    """
+                    
+                    # Execute with timeout and transaction management
+                    session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                    
+                    total_loaded += len(batch)
+                    batch_time = time.time() - batch_start
+                    
+                    print(
+                        f"✓ Batch {i//batch_size + 1}: {total_loaded:,}/{len(nodes_df):,} nodes "
+                        f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} nodes/sec)"
+                    )
+                    
+                except Exception as e:
+                    failed_batches += 1
+                    print(f"✗ Failed batch {i//batch_size + 1}: {e}")
+                    # Continue with next batch rather than failing completely
+                    continue
+        
+        total_time = time.time() - start_time
+        avg_rate = total_loaded / total_time if total_time > 0 else 0
+        
+        print(
+            f"Bulk loading complete: {total_loaded:,}/{len(nodes_df):,} nodes loaded "
+            f"in {total_time:.2f}s (avg rate: {avg_rate:.0f} nodes/sec)"
+        )
+        
+        if failed_batches > 0:
+            print(f"⚠️  {failed_batches} batches failed during loading")
+        
+        return {
+            "total_nodes": len(nodes_df),
+            "loaded_nodes": total_loaded,
+            "failed_batches": failed_batches,
+            "loading_time_seconds": round(total_time, 2),
+            "loading_rate_nodes_per_second": round(avg_rate, 0),
+            "batch_size": batch_size,
+            "success_rate": round(total_loaded / len(nodes_df) * 100, 1) if len(nodes_df) > 0 else 0
+        }
+        
+    finally:
+        driver.close()
+
+
+def bulk_load_edges_to_memgraph(
+    edges_df: pd.DataFrame,
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    batch_size: int = 5000,
+    timeout: int = 300
+) -> Dict[str, any]:
+    """
+    Efficiently load edges into Memgraph using bulk operations with proper transaction management.
+    
+    Args:
+        edges_df: DataFrame with columns: x_id, y_id, relation, display_relation
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
+        batch_size: Number of edges to process per batch (default: 5000)
+        timeout: Transaction timeout in seconds (default: 300)
+        
+    Returns:
+        Dictionary with loading statistics
+    """
+    import time
+    from neo4j import GraphDatabase
+    
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    
+    try:
+        start_time = time.time()
+        total_loaded = 0
+        failed_batches = 0
+        
+        print(f"Starting bulk edge loading: {len(edges_df):,} edges in batches of {batch_size}")
+        
+        with driver.session() as session:
+            for i in range(0, len(edges_df), batch_size):
+                batch_start = time.time()
+                batch = edges_df.iloc[i:i+batch_size]
+                
+                try:
+                    # Convert batch to list of dictionaries for bulk operation
+                    batch_data = []
+                    for _, row in batch.iterrows():
+                        batch_data.append({
+                            "x_id": row["x_id"],
+                            "y_id": row["y_id"],
+                            "relation": row["relation"],
+                            "display_relation": row["display_relation"]
+                        })
+                    
+                    # Use UNWIND for bulk relationship creation with proper transaction management
+                    bulk_query = """
+                    UNWIND $batch_data AS edge_data
+                    MATCH (x:Node {node_id: edge_data.x_id})
+                    MATCH (y:Node {node_id: edge_data.y_id})
+                    MERGE (x)-[r:RELATES {relation: edge_data.relation}]->(y)
+                    SET r.display_relation = edge_data.display_relation
+                    """
+                    
+                    # Execute with timeout and transaction management
+                    session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                    
+                    total_loaded += len(batch)
+                    batch_time = time.time() - batch_start
+                    
+                    print(
+                        f"✓ Batch {i//batch_size + 1}: {total_loaded:,}/{len(edges_df):,} edges "
+                        f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} edges/sec)"
+                    )
+                    
+                except Exception as e:
+                    failed_batches += 1
+                    print(f"✗ Failed batch {i//batch_size + 1}: {e}")
+                    # Continue with next batch rather than failing completely
+                    continue
+        
+        total_time = time.time() - start_time
+        avg_rate = total_loaded / total_time if total_time > 0 else 0
+        
+        print(
+            f"Bulk loading complete: {total_loaded:,}/{len(edges_df):,} edges loaded "
+            f"in {total_time:.2f}s (avg rate: {avg_rate:.0f} edges/sec)"
+        )
+        
+        if failed_batches > 0:
+            print(f"⚠️  {failed_batches} batches failed during loading")
+        
+        return {
+            "total_edges": len(edges_df),
+            "loaded_edges": total_loaded,
+            "failed_batches": failed_batches,
+            "loading_time_seconds": round(total_time, 2),
+            "loading_rate_edges_per_second": round(avg_rate, 0),
+            "batch_size": batch_size,
+            "success_rate": round(total_loaded / len(edges_df) * 100, 1) if len(edges_df) > 0 else 0
+        }
+        
+    finally:
+        driver.close()
