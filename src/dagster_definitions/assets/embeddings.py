@@ -463,14 +463,10 @@ def embedding_visualizations(
     try:
         # Import visualization libraries
         from sklearn.decomposition import PCA
-        from sklearn.manifold import TSNE
-        import matplotlib.pyplot as plt
-        import seaborn as sns
         import plotly.express as px
-        import plotly.graph_objects as go
     except ImportError as e:
         context.log.warning(f"Visualization libraries not available: {e}")
-        context.log.info("Install with: pip install scikit-learn matplotlib seaborn plotly")
+        context.log.info("Install with: pip install scikit-learn plotly")
         return {"status": "skipped", "reason": "missing_dependencies"}
     
     # Prepare data
@@ -671,6 +667,470 @@ def create_embedding_ascii_summary(pca_df: pd.DataFrame, type_stats: Dict, pca) 
     lines.append("📁 INTERACTIVE VISUALIZATIONS SAVED:")
     lines.append("   ├─ embeddings_pca_2d.html (2D scatter plot)")
     lines.append("   └─ embeddings_pca_3d.html (3D scatter plot)")
+    lines.append("")
+    lines.append("=" * 80)
+    
+    return "\n".join(lines)
+
+
+@asset(group_name="embeddings", compute_kind="memgraph", deps=[node2vec_embeddings])
+def memgraph_embedding_visualizations(
+    context: AssetExecutionContext,
+) -> Dict[str, Any]:
+    """Create visualizations using embeddings fetched directly from Memgraph."""
+    import numpy as np
+    
+    context.log.info("Creating embedding visualizations using Memgraph embeddings...")
+    
+    try:
+        # Import visualization libraries
+        from sklearn.decomposition import PCA
+        import plotly.express as px
+        import plotly.graph_objects as go
+    except ImportError as e:
+        context.log.warning(f"Visualization libraries not available: {e}")
+        context.log.info("Install with: pip install scikit-learn plotly")
+        return {"status": "skipped", "reason": "missing_dependencies"}
+    
+    # Get all nodes from Memgraph
+    context.log.info("Fetching all nodes from Memgraph...")
+    
+    # Query all nodes from Memgraph using direct connection (since MCP functions aren't directly importable)
+    try:
+        from neo4j import GraphDatabase
+        import os
+        
+        # Get Memgraph connection details
+        memgraph_uri = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
+        memgraph_user = os.getenv("MEMGRAPH_USER", "")
+        memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+        
+        # Handle authentication
+        auth = None
+        if memgraph_user or memgraph_password:
+            auth = (memgraph_user, memgraph_password)
+        
+        driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+        
+        with driver.session() as session:
+            # Query all nodes from Memgraph with their embeddings
+            all_nodes_query = """
+            MATCH (n:Node)
+            WHERE n.embedding IS NOT NULL
+            RETURN n.node_id as node_id,
+                   n.node_name as node_name, 
+                   n.node_type as node_type,
+                   n.node_source as node_source,
+                   n.embedding as embedding
+            LIMIT 1000
+            """
+            
+            result = session.run(all_nodes_query)
+            embedding_data = []
+            node_ids = set()
+            
+            for record in result:
+                embedding = np.array(record['embedding'])
+                node_id = str(record['node_id'])
+                embedding_data.append({
+                    'node_id': node_id,
+                    'node_name': record['node_name'],
+                    'node_type': record['node_type'],
+                    'embedding': embedding
+                })
+                node_ids.add(record['node_id'])
+            
+            # Query edges between the nodes that have embeddings
+            edges_query = """
+            MATCH (a:Node)-[r:RELATES]->(b:Node)
+            WHERE a.node_id IN $node_ids AND b.node_id IN $node_ids
+            RETURN a.node_id as source_id,
+                   b.node_id as target_id,
+                   r.relation as relation,
+                   r.display_relation as display_relation
+            """
+            
+            result = session.run(edges_query, node_ids=list(node_ids))
+            edges_data = []
+            
+            for record in result:
+                edges_data.append({
+                    'source_id': str(record['source_id']),
+                    'target_id': str(record['target_id']),
+                    'relation': record['relation'],
+                    'display_relation': record.get('display_relation', record['relation'])
+                })
+        
+        driver.close()
+        
+        if not embedding_data:
+            raise ValueError("No embeddings found in Memgraph. Ensure embeddings are stored in node properties.")
+        
+        context.log.info(f"Retrieved {len(embedding_data)} nodes with embeddings from Memgraph")
+        
+        # Log embedding statistics
+        embedding_dims = [len(item['embedding']) for item in embedding_data]
+        context.log.info(f"Embedding dimensions: min={min(embedding_dims)}, max={max(embedding_dims)}, avg={np.mean(embedding_dims):.1f}")
+        
+        # Log node types
+        node_types = [item['node_type'] for item in embedding_data]
+        type_counts = {}
+        for node_type in node_types:
+            type_counts[node_type] = type_counts.get(node_type, 0) + 1
+        context.log.info(f"Node types with embeddings: {type_counts}")
+        
+    except Exception as e:
+        context.log.error(f"Failed to fetch nodes and embeddings from Memgraph: {e}")
+        raise
+    
+    # Convert to arrays for analysis
+    embeddings_matrix = np.array([item['embedding'] for item in embedding_data])
+    node_types = [item['node_type'] for item in embedding_data]
+    node_names = [item['node_name'] for item in embedding_data]
+    
+    context.log.info(f"Analyzing {len(embeddings_matrix)} Memgraph embeddings of dimension {embeddings_matrix.shape[1]}")
+    
+    # Create visualization directory
+    viz_dir = Path("data/06_models/embeddings/visualizations")
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. PCA Analysis
+    context.log.info("Computing PCA on Memgraph embeddings...")
+    pca = PCA(n_components=min(3, embeddings_matrix.shape[1]))
+    pca_embeddings = pca.fit_transform(embeddings_matrix)
+    
+    # Create PCA DataFrame
+    pca_df = pd.DataFrame({
+        'node_id': [item['node_id'] for item in embedding_data],
+        'node_name': node_names,
+        'node_type': node_types,
+        'PC1': pca_embeddings[:, 0],
+        'PC2': pca_embeddings[:, 1],
+        'PC3': pca_embeddings[:, 2] if pca_embeddings.shape[1] > 2 else 0
+    })
+    
+    # 2. Create interactive Plotly visualizations
+    context.log.info("Creating interactive plots from Memgraph embeddings...")
+    
+    # PCA 2D scatter plot
+    fig_2d = px.scatter(
+        pca_df, 
+        x='PC1', 
+        y='PC2',
+        color='node_type',
+        hover_data=['node_name', 'node_id'],
+        title='Memgraph Node Embeddings - PCA 2D Projection',
+        width=800,
+        height=600
+    )
+    
+    # Save interactive plot
+    plot_2d_path = viz_dir / "memgraph_embeddings_pca_2d.html"
+    fig_2d.write_html(str(plot_2d_path))
+    
+    # PCA 3D scatter plot
+    fig_3d = px.scatter_3d(
+        pca_df,
+        x='PC1',
+        y='PC2', 
+        z='PC3',
+        color='node_type',
+        hover_data=['node_name', 'node_id'],
+        title='Memgraph Node Embeddings - PCA 3D Projection',
+        width=800,
+        height=600
+    )
+    
+    # Save 3D plot
+    plot_3d_path = viz_dir / "memgraph_embeddings_pca_3d.html"
+    fig_3d.write_html(str(plot_3d_path))
+    
+    # 3. Create graph visualization with legends
+    context.log.info("Creating graph visualization with legends...")
+    
+    # Build a NetworkX graph from the embedding data
+    G = nx.Graph()
+    
+    # Add nodes with their types and embeddings
+    for item in embedding_data:
+        G.add_node(item['node_id'], 
+                  node_name=item['node_name'],
+                  node_type=item['node_type'],
+                  embedding=item['embedding'])
+    
+    # Add edges from Memgraph data
+    for edge in edges_data:
+        source = edge['source_id']
+        target = edge['target_id']
+        if source in G.nodes() and target in G.nodes():
+            G.add_edge(source, target, 
+                      relation=edge['relation'],
+                      display_relation=edge['display_relation'])
+    
+    # Create interactive network plot using plotly
+    # Get node positions using spring layout
+    pos = nx.spring_layout(G, k=1, iterations=50)
+    
+    # Prepare node traces for different types
+    node_traces = {}
+    node_type_colors = {
+        'drug': '#FF6B6B',      # Red
+        'disease': '#4ECDC4',   # Teal  
+        'protein': '#45B7D1',   # Blue
+        'gene': '#96CEB4',      # Green
+        'other': '#FECA57'      # Yellow
+    }
+    
+    for node_type in set(node_types):
+        node_traces[node_type] = {
+            'x': [],
+            'y': [],
+            'text': [],
+            'ids': []
+        }
+    
+    # Fill node traces
+    for node_id in G.nodes():
+        node_data = G.nodes[node_id]
+        node_type = node_data['node_type']
+        
+        if node_type not in node_traces:
+            node_type = 'other'
+            
+        x, y = pos[node_id]
+        node_traces[node_type]['x'].append(x)
+        node_traces[node_type]['y'].append(y)
+        node_traces[node_type]['text'].append(f"{node_data['node_name']}<br>Type: {node_type}<br>ID: {node_id}")
+        node_traces[node_type]['ids'].append(node_id)
+    
+    # Create edge traces with relationship information
+    edge_x = []
+    edge_y = []
+    edge_info = []
+    
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+        
+        # Get relationship information
+        edge_data = edge[2]
+        relation = edge_data.get('display_relation', edge_data.get('relation', 'connected'))
+        source_name = G.nodes[edge[0]]['node_name']
+        target_name = G.nodes[edge[1]]['node_name']
+        edge_info.extend([f"{source_name} → {relation} → {target_name}", 
+                         f"{source_name} → {relation} → {target_name}", 
+                         None])
+    
+    # Create the figure
+    
+    fig_graph = go.Figure()
+    
+    # Add edges with hover information
+    fig_graph.add_trace(go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1, color='#888'),
+        mode='lines',
+        text=edge_info,
+        hovertemplate='%{text}<extra></extra>',
+        name='Relationships'
+    ))
+    
+    # Add node traces for each type
+    symbols = {'drug': 'circle', 'disease': 'square', 'protein': 'diamond', 'gene': 'triangle-up', 'other': 'star'}
+    
+    for node_type, trace_data in node_traces.items():
+        if trace_data['x']:  # Only add if there are nodes of this type
+            symbol = symbols.get(node_type, 'circle')
+            color = node_type_colors.get(node_type, '#FECA57')
+            emoji = {"drug": "💊", "disease": "🦠", "protein": "🧬", "gene": "🧬"}.get(node_type, "⚫")
+            
+            fig_graph.add_trace(go.Scatter(
+                x=trace_data['x'], 
+                y=trace_data['y'],
+                mode='markers',
+                marker=dict(
+                    size=12,
+                    color=color,
+                    symbol=symbol,
+                    line=dict(width=2, color='white')
+                ),
+                text=trace_data['text'],
+                hoverinfo='text',
+                name=f'{emoji} {node_type.title()}'
+            ))
+    
+    # Update layout
+    fig_graph.update_layout(
+        title={
+            'text': 'Memgraph Knowledge Graph - Actual Node Relationships',
+            'font': {'size': 16}
+        },
+        showlegend=True,
+        hovermode='closest',
+        margin=dict(b=20,l=5,r=5,t=40),
+        annotations=[ dict(
+            text="Nodes connected by actual relationships from Memgraph knowledge graph",
+            showarrow=False,
+            xref="paper", yref="paper",
+            x=0.005, y=-0.002,
+            xanchor='left', yanchor='bottom',
+            font=dict(color="#666", size=12)
+        )],
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        width=900,
+        height=700
+    )
+    
+    # Save graph plot
+    plot_graph_path = viz_dir / "memgraph_embedding_graph.html"
+    fig_graph.write_html(str(plot_graph_path))
+    
+    context.log.info(f"Created graph visualization with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+    
+    # 4. Embedding statistics by node type
+    context.log.info("Computing Memgraph embedding statistics by node type...")
+    
+    type_stats = {}
+    for node_type in set(node_types):
+        type_mask = np.array(node_types) == node_type
+        type_embeddings = embeddings_matrix[type_mask]
+        
+        if len(type_embeddings) > 0:
+            type_stats[node_type] = {
+                'count': len(type_embeddings),
+                'mean_norm': float(np.mean([np.linalg.norm(emb) for emb in type_embeddings])),
+                'std_norm': float(np.std([np.linalg.norm(emb) for emb in type_embeddings])),
+                'mean_values': float(np.mean(type_embeddings)),
+                'std_values': float(np.std(type_embeddings))
+            }
+    
+    # 4. Create ASCII embedding summary
+    ascii_summary = create_memgraph_embedding_ascii_summary(pca_df, type_stats, pca)
+    context.log.info("Memgraph Embedding Visualization Summary:")
+    context.log.info("\n" + ascii_summary)
+    
+    # 5. Save summary data
+    summary_data = {
+        'source': 'memgraph',
+        'pca_explained_variance': [float(x) for x in pca.explained_variance_ratio_.tolist()],
+        'node_type_stats': type_stats,
+        'total_nodes_processed': len(embedding_data),
+        'embedding_dimension': int(embeddings_matrix.shape[1]),
+        'graph_stats': {
+            'nodes': G.number_of_nodes(),
+            'edges': G.number_of_edges()
+        },
+        'visualization_files': {
+            'pca_2d': str(plot_2d_path),
+            'pca_3d': str(plot_3d_path),
+            'graph': str(plot_graph_path)
+        }
+    }
+    
+    context.add_output_metadata({
+        "embedding_source": "memgraph",
+        "visualizations_created": 3,
+        "pca_explained_variance_2d": f"{float(sum(pca.explained_variance_ratio_[:2])):.3f}",
+        "pca_explained_variance_3d": f"{float(sum(pca.explained_variance_ratio_[:3])):.3f}",
+        "output_directory": str(viz_dir),
+        "node_types_visualized": len(type_stats),
+        "embeddings_retrieved": len(embedding_data),
+        "graph_nodes": G.number_of_nodes(),
+        "graph_edges": G.number_of_edges(),
+        "interactive_plots": ["memgraph_embeddings_pca_2d.html", "memgraph_embeddings_pca_3d.html", "memgraph_embedding_graph.html"],
+        "📊 2D PCA Plot": f"file://{plot_2d_path.absolute()}",
+        "🎯 3D PCA Plot": f"file://{plot_3d_path.absolute()}",
+        "🕸️ Graph Plot": f"file://{plot_graph_path.absolute()}",
+        "visualization_urls": {
+            "2d_plot": f"file://{plot_2d_path.absolute()}",
+            "3d_plot": f"file://{plot_3d_path.absolute()}",
+            "graph_plot": f"file://{plot_graph_path.absolute()}"
+        }
+    })
+    
+    return summary_data
+
+
+def create_memgraph_embedding_ascii_summary(pca_df: pd.DataFrame, type_stats: Dict, pca) -> str:
+    """Create ASCII summary of Memgraph embedding analysis."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("🎯 MEMGRAPH EMBEDDINGS VISUALIZATION SUMMARY")
+    lines.append("=" * 80)
+    lines.append("")
+    
+    # Data source info
+    lines.append("📊 DATA SOURCE:")
+    lines.append("   ├─ Source: Memgraph Database (All Nodes with Embeddings)")
+    lines.append(f"   └─ Successfully retrieved: {len(pca_df)} embeddings")
+    lines.append("")
+    
+    # PCA Analysis
+    lines.append("📈 PCA ANALYSIS:")
+    explained_var = pca.explained_variance_ratio_
+    lines.append(f"   PC1 explains: {explained_var[0]:.1%} of variance")
+    lines.append(f"   PC2 explains: {explained_var[1]:.1%} of variance")
+    if len(explained_var) > 2:
+        lines.append(f"   PC3 explains: {explained_var[2]:.1%} of variance")
+    lines.append(f"   Total (2D): {sum(explained_var[:2]):.1%} of variance captured")
+    lines.append("")
+    
+    # Node type distribution in embedding space
+    lines.append("🏷️  NODE TYPES IN MEMGRAPH EMBEDDING SPACE:")
+    for node_type, stats in type_stats.items():
+        symbol = {"drug": "💊", "disease": "🦠", "protein": "🧬", "gene": "🧬"}.get(node_type, "⚫")
+        lines.append(f"   {symbol} {node_type}: {stats['count']} nodes")
+        lines.append(f"      ├─ Avg embedding norm: {stats['mean_norm']:.3f} ± {stats['std_norm']:.3f}")
+        lines.append(f"      └─ Avg value: {stats['mean_values']:.3f} ± {stats['std_values']:.3f}")
+    lines.append("")
+    
+    # Embedding space insights
+    lines.append("🔍 MEMGRAPH EMBEDDING SPACE INSIGHTS:")
+    
+    # Find node types that are close/far in PC1-PC2 space
+    type_means = {}
+    for node_type in type_stats.keys():
+        type_mask = pca_df['node_type'] == node_type
+        if type_mask.sum() > 0:
+            type_means[node_type] = {
+                'pc1': pca_df[type_mask]['PC1'].mean(),
+                'pc2': pca_df[type_mask]['PC2'].mean()
+            }
+    
+    # Calculate distances between node types
+    if len(type_means) > 1:
+        distances = []
+        type_list = list(type_means.keys())
+        for i in range(len(type_list)):
+            for j in range(i+1, len(type_list)):
+                t1, t2 = type_list[i], type_list[j]
+                dist = np.sqrt((type_means[t1]['pc1'] - type_means[t2]['pc1'])**2 + 
+                              (type_means[t1]['pc2'] - type_means[t2]['pc2'])**2)
+                distances.append((t1, t2, dist))
+        
+        # Sort by distance
+        distances.sort(key=lambda x: x[2])
+        
+        if distances:
+            closest = distances[0]
+            farthest = distances[-1]
+            lines.append(f"   📍 Closest node types: {closest[0]} ↔ {closest[1]} (distance: {closest[2]:.2f})")
+            lines.append(f"   📍 Farthest node types: {farthest[0]} ↔ {farthest[1]} (distance: {farthest[2]:.2f})")
+    
+    lines.append("")
+    lines.append("📁 INTERACTIVE VISUALIZATIONS SAVED:")
+    lines.append("   ├─ memgraph_embeddings_pca_2d.html (2D scatter plot)")
+    lines.append("   ├─ memgraph_embeddings_pca_3d.html (3D scatter plot)")
+    lines.append("   └─ memgraph_embedding_graph.html (Network graph with legends)")
+    lines.append("")
+    lines.append("🔄 COMPARISON WITH NODE2VEC:")
+    lines.append("   ├─ This asset fetches REAL embeddings from Memgraph n.embedding property")
+    lines.append("   ├─ Only processes nodes that have embeddings stored")
+    lines.append("   ├─ Previous asset (embedding_visualizations) uses Node2Vec output from sample")
+    lines.append("   └─ Both run after node2vec_embeddings for comparison")
     lines.append("")
     lines.append("=" * 80)
     
