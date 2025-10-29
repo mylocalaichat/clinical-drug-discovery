@@ -26,7 +26,6 @@ mlartifacts/
 .neo4j/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
