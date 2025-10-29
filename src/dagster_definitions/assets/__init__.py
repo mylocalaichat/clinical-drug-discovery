@@ -21,12 +21,11 @@ from .embedding_drug_discovery import (
     embedding_enhanced_drug_discovery,
 )
 from .embeddings import (
-    embedding_dataframe,
-    embedding_validation_stats,
+    embedding_visualizations,
     flattened_embeddings,
     knowledge_graph,
     node2vec_embeddings,
-    saved_embeddings,
+    random_graph_sample,
 )
 from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
 
@@ -64,12 +63,11 @@ __all__ = [
     "drug_similarity_matrix",
     "embedding_enhanced_drug_discovery",
     # Graph Embeddings
+    "random_graph_sample",
     "knowledge_graph",
     "node2vec_embeddings",
-    "saved_embeddings",
-    "embedding_dataframe",
     "flattened_embeddings",
-    "embedding_validation_stats",
+    "embedding_visualizations",
     # Link Prediction (disabled until OpenMP installed)
     # "link_prediction_drugs",
     # "link_prediction_diseases",

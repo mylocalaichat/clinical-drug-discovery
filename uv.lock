@@ -327,6 +327,7 @@ dependencies = [
     { name = "dagster-postgres" },
     { name = "dagster-webserver" },
     { name = "lightgbm" },
+    { name = "matplotlib" },
     { name = "mlflow" },
     { name = "neo4j" },
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -334,10 +335,12 @@ dependencies = [
     { name = "node2vec" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "plotly" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
     { name = "scispacy" },
+    { name = "seaborn" },
     { name = "spacy" },
     { name = "tqdm" },
     { name = "xgboost" },
@@ -349,16 +352,19 @@ requires-dist = [
     { name = "dagster-postgres", specifier = ">=0.27.16" },
     { name = "dagster-webserver", specifier = ">=1.11.16" },
     { name = "lightgbm", specifier = ">=4.0.0" },
+    { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "mlflow", specifier = ">=3.5.1" },
     { name = "neo4j", specifier = ">=6.0.2" },
     { name = "networkx", specifier = ">=3.1" },
     { name = "node2vec", specifier = ">=0.4.6" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "plotly", specifier = ">=6.3.1" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "scispacy", specifier = ">=0.6.2" },
+    { name = "seaborn", specifier = ">=0.13.2" },
     { name = "spacy", specifier = ">=3.7.4,<3.8.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "xgboost", specifier = ">=2.0.0" },
@@ -2014,6 +2020,15 @@ wheels = [
 ]
 
 [[package]]
+name = "narwhals"
+version = "2.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/e5/ef07d31c2e07d99eecac8e14ace5c20aeb00ecba4ed5bb00343136380524/narwhals-2.10.0.tar.gz", hash = "sha256:1c05bbef2048a4045263de7d98c3d06140583eb13d796dd733b2157f05d24485", size = 582423 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/13/024ae0586d901f8a6f99e2d29b4ae217e8ef11d3fd944cdfc3bbde5f2a08/narwhals-2.10.0-py3-none-any.whl", hash = "sha256:baed44e8fc38e800e3a585e3fa9843a7079a6fad5fbffbecee4348d6ac52298c", size = 418077 },
+]
+
+[[package]]
 name = "neo4j"
 version = "6.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2369,6 +2384,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/61/33/9611380c2bdb1225fdef633e2a9610622310fed35ab11dac9620972ee088/platformdirs-4.5.0.tar.gz", hash = "sha256:70ddccdd7c99fc5942e9fc25636a8b34d04c24b335100223152c2803e4063312", size = 21632 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/cb/ac7874b3e5d58441674fb70742e6c374b28b0c7cb988d37d991cde47166c/platformdirs-4.5.0-py3-none-any.whl", hash = "sha256:e578a81bb873cbb89a41fcc904c7ef523cc18284b7e3b3ccf06aca1403b7ebd3", size = 18651 },
+]
+
+[[package]]
+name = "plotly"
+version = "6.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "narwhals" },
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/63/961d47c9ffd592a575495891cdcf7875dc0903ebb33ac238935714213789/plotly-6.3.1.tar.gz", hash = "sha256:dd896e3d940e653a7ce0470087e82c2bd903969a55e30d1b01bb389319461bb0", size = 6956460 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/93/023955c26b0ce614342d11cc0652f1e45e32393b6ab9d11a664a60e9b7b7/plotly-6.3.1-py3-none-any.whl", hash = "sha256:8b4420d1dcf2b040f5983eed433f95732ed24930e496d36eb70d211923532e64", size = 9833698 },
 ]
 
 [[package]]
@@ -3231,6 +3259,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d5/f1/cd5837f74d7001cb9ad518e728c1c2a4dae00d176ac9a27a5a2398691682/scispacy-0.6.2.tar.gz", hash = "sha256:a591fdd36027e854d4c3098c1ede3a717e98ece420f9a7097a7658601457ed5c", size = 65936 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/53/134dc2faeef3c3996c23fa97cc422c9d6553b584f211ccfe13f208830253/scispacy-0.6.2-py3-none-any.whl", hash = "sha256:4a4d38948c95e7233a31bc42751336f4fda0da3a554dd5f29197a2d2eef42452", size = 62607 },
+]
+
+[[package]]
+name = "seaborn"
+version = "0.13.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/59/a451d7420a77ab0b98f7affa3a1d78a313d2f7281a57afb1a34bae8ab412/seaborn-0.13.2.tar.gz", hash = "sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7", size = 1457696 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/11/00d3c3dfc25ad54e731d91449895a79e4bf2384dc3ac01809010ba88f6d5/seaborn-0.13.2-py3-none-any.whl", hash = "sha256:636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987", size = 294914 },
 ]
 
 [[package]]

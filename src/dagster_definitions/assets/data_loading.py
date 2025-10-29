@@ -50,33 +50,62 @@ def memgraph_database_ready(context: AssetExecutionContext, primekg_download_sta
     
     try:
         with driver.session() as session:
-            context.log.info("Deleting all existing nodes and edges...")
-            
-            # Delete all relationships first
-            result = session.run("MATCH ()-[r]->() DELETE r")
-            context.log.info("Deleted all relationships")
-            
-            # Then delete all nodes
-            result = session.run("MATCH (n) DELETE n")
-            context.log.info("Deleted all nodes")
-            
-            # Verify cleanup
+            # First check what's currently in the database
             node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
             edge_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()["count"]
             
-            context.log.info(f"Database cleanup complete - Nodes: {node_count}, Edges: {edge_count}")
+            context.log.info(f"Found existing data - Nodes: {node_count:,}, Edges: {edge_count:,}")
+            
+            if node_count > 0 or edge_count > 0:
+                context.log.info("Performing complete database cleanup...")
+                
+                # Method 1: Use DETACH DELETE for complete cleanup (faster)
+                try:
+                    context.log.info("Using DETACH DELETE for complete cleanup...")
+                    session.run("MATCH (n) DETACH DELETE n", timeout=600)  # 10 minute timeout
+                    context.log.info("✓ DETACH DELETE completed successfully")
+                except Exception as e:
+                    context.log.warning(f"DETACH DELETE failed: {e}")
+                    context.log.info("Falling back to separate edge/node deletion...")
+                    
+                    # Method 2: Fallback - delete edges then nodes separately
+                    try:
+                        # Delete all relationships first
+                        context.log.info("Deleting all relationships...")
+                        session.run("MATCH ()-[r]->() DELETE r", timeout=300)
+                        context.log.info("✓ All relationships deleted")
+                        
+                        # Then delete all nodes
+                        context.log.info("Deleting all nodes...")
+                        session.run("MATCH (n) DELETE n", timeout=300)
+                        context.log.info("✓ All nodes deleted")
+                    except Exception as e2:
+                        context.log.error(f"Fallback deletion also failed: {e2}")
+                        raise e2
+            else:
+                context.log.info("Database is already empty, no cleanup needed")
+            
+            # Verify cleanup is complete
+            final_node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
+            final_edge_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()["count"]
+            
+            context.log.info(f"Database cleanup verified - Nodes: {final_node_count}, Edges: {final_edge_count}")
+            
+            if final_node_count > 0 or final_edge_count > 0:
+                raise Exception(f"Database cleanup incomplete! Still found {final_node_count} nodes and {final_edge_count} edges")
             
     finally:
         driver.close()
 
+    # Now setup the database (but skip the cleanup since we already did it)
     result = setup_memgraph_database(
         memgraph_uri=os.getenv("MEMGRAPH_URI"),
         memgraph_user=os.getenv("MEMGRAPH_USER"),
         memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
-        fresh_start=True,
+        fresh_start=False,  # Set to False since we already cleaned up
     )
 
-    context.log.info("Database setup complete")
+    context.log.info("Database setup complete - ready for fresh data loading")
     return result
 
 
@@ -202,7 +231,7 @@ def drug_features_loaded(
     try:
         with driver.session() as session:
             # Add drug features to existing nodes
-            batch_size = 1000
+            batch_size = 10000  # Increased from 1000 for better performance
             loaded_count = 0
 
             for i in range(0, len(drug_df), batch_size):
@@ -268,7 +297,7 @@ def disease_features_loaded(
     try:
         with driver.session() as session:
             # Add disease features to existing nodes
-            batch_size = 1000
+            batch_size = 10000  # Increased from 1000 for better performance
             loaded_count = 0
 
             for i in range(0, len(disease_df), batch_size):
