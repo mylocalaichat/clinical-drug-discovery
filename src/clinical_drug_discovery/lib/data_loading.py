@@ -1,5 +1,5 @@
 """
-Data loading utilities for PrimeKG dataset.
+Data loading utilities for PrimeKG dataset with Memgraph.
 """
 
 import os
@@ -10,7 +10,80 @@ from typing import Dict
 
 import pandas as pd
 from neo4j import GraphDatabase
-from tqdm import tqdm
+
+
+def get_database_session(driver, database: str = None):
+    """
+    Create a database session for Memgraph.
+    The database parameter is ignored since Memgraph uses a single database.
+    """
+    return driver.session()
+
+
+def setup_memgraph_database(
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    database: str = "memgraph",
+    fresh_start: bool = True,
+) -> Dict[str, str]:
+    """
+    Setup Memgraph database (clear all data if fresh_start=True).
+
+    Args:
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username (often empty for local)
+        memgraph_password: Memgraph password (often empty for local)
+        database: Database name (ignored for Memgraph)
+        fresh_start: If True, clear all data
+
+    Returns:
+        Dictionary with database status
+    """
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+
+    try:
+        print("Connecting to Memgraph...")
+        
+        if fresh_start:
+            print("Clearing all data from Memgraph...")
+            with driver.session() as session:
+                try:
+                    # First try to get a count of existing data
+                    result = session.run("MATCH (n) RETURN count(n) as count LIMIT 1")
+                    node_count = result.single()['count']
+                    print(f"Found {node_count:,} nodes in database")
+                    
+                    if node_count > 0:
+                        print("Clearing all nodes and relationships...")
+                        session.run("MATCH (n) DETACH DELETE n", timeout=300)  # 5 minute timeout
+                        print("✓ All data cleared from Memgraph")
+                    else:
+                        print("✓ Memgraph is already empty")
+                        
+                except Exception as e:
+                    print(f"Warning: Could not clear existing data: {e}")
+                    print("Continuing anyway - this might be okay if database is empty")
+
+        # Test final connection
+        print("Testing Memgraph connection...")
+        with driver.session() as session:
+            session.run("RETURN 1")
+            print("✓ Memgraph is ready!")
+
+        return {
+            "status": "ready",
+            "database": "memgraph",
+            "database_type": "memgraph"
+        }
+
+    finally:
+        driver.close()
 
 
 def download_primekg_data(download_dir: str) -> Dict[str, str]:
@@ -115,71 +188,6 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
     }
 
 
-def setup_neo4j_database(
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-    fresh_start: bool = True,
-) -> Dict[str, str]:
-    """
-    Setup Neo4j database (drop and recreate if fresh_start=True).
-
-    Args:
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-        fresh_start: If True, drop and recreate database
-
-    Returns:
-        Dictionary with database status
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        with driver.session(database="system") as session:
-            # Check if database exists
-            result = session.run("SHOW DATABASES")
-            databases = [record["name"] for record in result]
-
-            if fresh_start and database in databases:
-                print(f"Dropping existing database '{database}'...")
-                try:
-                    session.run(f"STOP DATABASE `{database}`")
-                except Exception as e:
-                    print(f"Note: {e}")
-
-                session.run(f"DROP DATABASE `{database}` IF EXISTS")
-                print(f"Dropped database '{database}'")
-
-            # Create database if it doesn't exist
-            if database not in databases or fresh_start:
-                print(f"Creating database '{database}'...")
-                session.run(f"CREATE DATABASE `{database}`")
-                print(f"Database '{database}' created successfully!")
-
-        # Wait for database to be ready
-        print("Waiting for database to be ready...")
-        max_retries = 30
-        for i in range(max_retries):
-            try:
-                with driver.session(database=database) as session:
-                    session.run("RETURN 1")
-                    print("Database is ready!")
-                    break
-            except Exception as e:
-                if i < max_retries - 1:
-                    time.sleep(1)
-                else:
-                    raise Exception(
-                        f"Database did not become ready after {max_retries} seconds: {e}"
-                    )
-
-        return {"status": "success", "database": database, "action": "created" if fresh_start else "verified"}
-
-    finally:
-        driver.close()
 
 
 def extract_nodes_from_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
@@ -215,269 +223,266 @@ def extract_nodes_from_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
     return unique_nodes
 
 
-def load_nodes_to_neo4j(
-    nodes_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load nodes from DataFrame into Neo4j.
 
+
+
+def bulk_load_nodes_to_memgraph(
+    nodes_df: pd.DataFrame,
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    batch_size: int = 5000,
+    timeout: int = 300
+) -> Dict[str, any]:
+    """
+    Efficiently load nodes into Memgraph using bulk operations with proper transaction management.
+    
     Args:
         nodes_df: DataFrame with columns: node_index, node_id, node_type, node_name, node_source
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
+        batch_size: Number of nodes to process per batch (default: 5000)
+        timeout: Transaction timeout in seconds (default: 300)
+        
     Returns:
         Dictionary with loading statistics
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
+    import time
+    from neo4j import GraphDatabase
+    
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    
     try:
-        print(f"\nTotal nodes to load: {len(nodes_df):,}")
-        print("\nNode types distribution:")
-        print(nodes_df['node_type'].value_counts())
-
-        with driver.session(database=database) as session:
-            # Create indices
-            print("\nCreating indices...")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_index)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_id)")
-            session.run("CREATE INDEX IF NOT EXISTS FOR (n:PrimeKGNode) ON (n.node_type)")
-
-            # Load nodes in batches
-            batch_size = 50000
-            total_processed = 0
-            print("\nLoading nodes in batches...")
-
-            for i in tqdm(range(0, len(nodes_df), batch_size)):
-                batch = nodes_df.iloc[i : i + batch_size]
-
-                query = """
-                UNWIND $rows AS row
-                MERGE (n:PrimeKGNode {node_index: row.node_index})
-                SET n.node_id = row.node_id,
-                    n.node_type = row.node_type,
-                    n.node_name = row.node_name,
-                    n.node_source = row.node_source
-                """
-                result = session.run(query, {"rows": batch.to_dict("records")})
-                result.consume()
-                total_processed += len(batch)
-
-            # Get final count
-            result = session.run("MATCH (n:PrimeKGNode) RETURN count(n) as count").single()
-            final_count = result['count']
-            print(f"\nTotal nodes loaded: {final_count:,}")
-
-            return {
-                "nodes_processed": total_processed,
-                "nodes_in_db": final_count
-            }
-
-    finally:
-        driver.close()
-
-
-def load_edges_to_neo4j(
-    edges_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load edges from DataFrame into Neo4j.
-
-    Args:
-        edges_df: DataFrame with columns: x_index, y_index, relation, display_relation
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal edges to load: {len(edges_df):,}")
-        print("\nRelation types distribution:")
-        print(edges_df['relation'].value_counts())
-
-        total_processed = 0
-        relation_types = edges_df['relation'].unique()
-        print(f"\nFound {len(relation_types)} unique relationship types")
-
-        for rel_type in tqdm(relation_types, desc="Relationship types"):
-            rel_edges = edges_df[edges_df['relation'] == rel_type]
-            neo4j_rel_type = rel_type.upper().replace("-", "_").replace(" ", "_")
-
-            batch_size = 5000
-            for i in range(0, len(rel_edges), batch_size):
-                batch = rel_edges.iloc[i : i + batch_size]
-
-                with driver.session(database=database) as session:
-                    query = f"""
-                    UNWIND $rows AS row
-                    MATCH (source:PrimeKGNode {{node_index: row.x_index}})
-                    MATCH (target:PrimeKGNode {{node_index: row.y_index}})
-                    MERGE (source)-[r:`{neo4j_rel_type}`]->(target)
-                    SET r.display_relation = row.display_relation
+        start_time = time.time()
+        total_loaded = 0
+        failed_batches = 0
+        
+        print(f"Starting bulk node loading: {len(nodes_df):,} nodes in batches of {batch_size}")
+        
+        with driver.session() as session:
+            # Create index for faster lookups
+            try:
+                session.run("CREATE INDEX ON :Node(node_id)")
+                print("✓ Created index on Node(node_id)")
+            except Exception as e:
+                print(f"Index may already exist: {e}")
+            
+            for i in range(0, len(nodes_df), batch_size):
+                batch_start = time.time()
+                batch = nodes_df.iloc[i:i+batch_size]
+                
+                try:
+                    # Convert batch to list of dictionaries for bulk operation
+                    batch_data = []
+                    for _, row in batch.iterrows():
+                        batch_data.append({
+                            "node_id": row["node_id"],
+                            "node_index": int(row["node_index"]),
+                            "node_type": row["node_type"],
+                            "node_name": row["node_name"],
+                            "node_source": row["node_source"]
+                        })
+                    
+                    # Use CREATE instead of MERGE for better performance (assumes clean database)
+                    bulk_query = """
+                    UNWIND $batch_data AS node_data
+                    CREATE (n:Node {
+                        node_id: node_data.node_id,
+                        node_index: node_data.node_index,
+                        node_type: node_data.node_type,
+                        node_name: node_data.node_name,
+                        node_source: node_data.node_source
+                    })
                     """
-                    result = session.run(query, {"rows": batch.to_dict("records")})
-                    result.consume()
-                    total_processed += len(batch)
-
-        # Get final count
-        with driver.session(database=database) as session:
-            result = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()
-            final_count = result['count']
-            print(f"\nTotal edges loaded: {final_count:,}")
-
+                    
+                    # Retry logic: attempt up to 3 times
+                    max_retries = 3
+                    retry_count = 0
+                    batch_successful = False
+                    
+                    while retry_count < max_retries and not batch_successful:
+                        try:
+                            # Execute with timeout and transaction management
+                            session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                            batch_successful = True
+                            
+                            total_loaded += len(batch)
+                            batch_time = time.time() - batch_start
+                            
+                            retry_msg = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(
+                                f"✓ Batch {i//batch_size + 1}{retry_msg}: {total_loaded:,}/{len(nodes_df):,} nodes "
+                                f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} nodes/sec)"
+                            )
+                            
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                print(f"⚠️  Batch {i//batch_size + 1} failed (attempt {retry_count}), retrying: {e}")
+                                time.sleep(2 ** retry_count)  # Exponential backoff: 2s, 4s, 8s
+                            else:
+                                failed_batches += 1
+                                print(f"✗ Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}")
+                                break
+                    
+                except Exception as e:
+                    failed_batches += 1
+                    print(f"✗ Critical error in batch {i//batch_size + 1}: {e}")
+                    # Continue with next batch rather than failing completely
+                    continue
+        
+        total_time = time.time() - start_time
+        avg_rate = total_loaded / total_time if total_time > 0 else 0
+        
+        print(
+            f"Bulk loading complete: {total_loaded:,}/{len(nodes_df):,} nodes loaded "
+            f"in {total_time:.2f}s (avg rate: {avg_rate:.0f} nodes/sec)"
+        )
+        
+        if failed_batches > 0:
+            print(f"⚠️  {failed_batches} batches failed during loading")
+        
         return {
-            "edges_processed": total_processed,
-            "edges_in_db": final_count
+            "total_nodes": len(nodes_df),
+            "loaded_nodes": total_loaded,
+            "failed_batches": failed_batches,
+            "loading_time_seconds": round(total_time, 2),
+            "loading_rate_nodes_per_second": round(avg_rate, 0),
+            "batch_size": batch_size,
+            "success_rate": round(total_loaded / len(nodes_df) * 100, 1) if len(nodes_df) > 0 else 0
         }
-
+        
     finally:
         driver.close()
 
 
-def load_drug_features_to_neo4j(
-    drug_features_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
+def bulk_load_edges_to_memgraph(
+    edges_df: pd.DataFrame,
+    memgraph_uri: str,
+    memgraph_user: str = "",
+    memgraph_password: str = "",
+    batch_size: int = 5000,
+    timeout: int = 300
+) -> Dict[str, any]:
     """
-    Load drug features and attach to existing drug nodes.
-
+    Efficiently load edges into Memgraph using bulk operations with proper transaction management.
+    
     Args:
-        drug_features_df: DataFrame with drug feature columns
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
+        edges_df: DataFrame with columns: x_id, y_id, relation, display_relation
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
+        batch_size: Number of edges to process per batch (default: 5000)
+        timeout: Transaction timeout in seconds (default: 300)
+        
     Returns:
         Dictionary with loading statistics
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
+    from neo4j import GraphDatabase
+    
+    # Handle empty credentials for local Memgraph
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+    
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    
     try:
-        print(f"\nTotal drug features to load: {len(drug_features_df):,}")
-
-        with driver.session(database=database) as session:
-            batch_size = 1000
-            total_processed = 0
-
-            print("\nAttaching drug features to nodes...")
-            for i in tqdm(range(0, len(drug_features_df), batch_size)):
-                batch = drug_features_df.iloc[i : i + batch_size]
-                batch_dict = batch.where(pd.notnull(batch), None).to_dict("records")
-
-                query = """
-                UNWIND $rows AS row
-                MATCH (n:PrimeKGNode {node_index: row.node_index, node_type: 'drug'})
-                SET n.description = row.description,
-                    n.half_life = row.half_life,
-                    n.indication = row.indication,
-                    n.mechanism_of_action = row.mechanism_of_action,
-                    n.protein_binding = row.protein_binding,
-                    n.pharmacodynamics = row.pharmacodynamics,
-                    n.state = row.state,
-                    n.atc_1 = row.atc_1,
-                    n.atc_2 = row.atc_2,
-                    n.atc_3 = row.atc_3,
-                    n.atc_4 = row.atc_4,
-                    n.category = row.category,
-                    n.group = row.group,
-                    n.pathway = row.pathway,
-                    n.molecular_weight = row.molecular_weight,
-                    n.tpsa = row.tpsa,
-                    n.clogp = row.clogp
-                """
-                result = session.run(query, {"rows": batch_dict})
-                result.consume()
-                total_processed += len(batch)
-
-            print(f"\nTotal drug features loaded: {total_processed:,}")
-
-            return {"drug_features_processed": total_processed}
-
-    finally:
-        driver.close()
-
-
-def load_disease_features_to_neo4j(
-    disease_features_df: pd.DataFrame,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
-) -> Dict[str, int]:
-    """
-    Load disease features and attach to existing disease nodes.
-
-    Args:
-        disease_features_df: DataFrame with disease feature columns
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        database: Database name
-
-    Returns:
-        Dictionary with loading statistics
-    """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-
-    try:
-        print(f"\nTotal disease features to load: {len(disease_features_df):,}")
-
-        with driver.session(database=database) as session:
-            batch_size = 1000
-            total_processed = 0
-
-            print("\nAttaching disease features to nodes...")
-            for i in tqdm(range(0, len(disease_features_df), batch_size)):
-                batch = disease_features_df.iloc[i : i + batch_size]
-                batch_dict = batch.where(pd.notnull(batch), None).to_dict("records")
-
-                query = """
-                UNWIND $rows AS row
-                MATCH (n:PrimeKGNode {node_index: row.node_index, node_type: 'disease'})
-                SET n.mondo_id = row.mondo_id,
-                    n.mondo_name = row.mondo_name,
-                    n.group_id_bert = row.group_id_bert,
-                    n.group_name_bert = row.group_name_bert,
-                    n.mondo_definition = row.mondo_definition,
-                    n.umls_description = row.umls_description,
-                    n.orphanet_definition = row.orphanet_definition,
-                    n.orphanet_prevalence = row.orphanet_prevalence,
-                    n.orphanet_epidemiology = row.orphanet_epidemiology,
-                    n.orphanet_clinical_description = row.orphanet_clinical_description,
-                    n.orphanet_management_and_treatment = row.orphanet_management_and_treatment,
-                    n.mayo_symptoms = row.mayo_symptoms,
-                    n.mayo_causes = row.mayo_causes,
-                    n.mayo_risk_factors = row.mayo_risk_factors,
-                    n.mayo_complications = row.mayo_complications,
-                    n.mayo_prevention = row.mayo_prevention,
-                    n.mayo_see_doc = row.mayo_see_doc
-                """
-                result = session.run(query, {"rows": batch_dict})
-                result.consume()
-                total_processed += len(batch)
-
-            print(f"\nTotal disease features loaded: {total_processed:,}")
-
-            return {"disease_features_processed": total_processed}
-
+        start_time = time.time()
+        total_loaded = 0
+        failed_batches = 0
+        
+        print(f"Starting bulk edge loading: {len(edges_df):,} edges in batches of {batch_size}")
+        
+        with driver.session() as session:
+            for i in range(0, len(edges_df), batch_size):
+                batch_start = time.time()
+                batch = edges_df.iloc[i:i+batch_size]
+                
+                try:
+                    # Convert batch to list of dictionaries for bulk operation
+                    batch_data = []
+                    for _, row in batch.iterrows():
+                        batch_data.append({
+                            "x_id": row["x_id"],
+                            "y_id": row["y_id"],
+                            "relation": row["relation"],
+                            "display_relation": row["display_relation"]
+                        })
+                    
+                    # Optimized bulk relationship creation - uses CREATE for performance
+                    bulk_query = """
+                    UNWIND $batch_data AS edge_data
+                    MATCH (x:Node {node_id: edge_data.x_id})
+                    MATCH (y:Node {node_id: edge_data.y_id})
+                    CREATE (x)-[r:RELATES {
+                        relation: edge_data.relation,
+                        display_relation: edge_data.display_relation
+                    }]->(y)
+                    """
+                    
+                    # Retry logic: attempt up to 3 times
+                    max_retries = 3
+                    retry_count = 0
+                    batch_successful = False
+                    
+                    while retry_count < max_retries and not batch_successful:
+                        try:
+                            # Execute with timeout and transaction management
+                            session.run(bulk_query, {"batch_data": batch_data}, timeout=timeout)
+                            batch_successful = True
+                            
+                            total_loaded += len(batch)
+                            batch_time = time.time() - batch_start
+                            
+                            retry_msg = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(
+                                f"✓ Batch {i//batch_size + 1}{retry_msg}: {total_loaded:,}/{len(edges_df):,} edges "
+                                f"({batch_time:.2f}s, {len(batch)/batch_time:.0f} edges/sec)"
+                            )
+                            
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                print(f"⚠️  Batch {i//batch_size + 1} failed (attempt {retry_count}), retrying: {e}")
+                                time.sleep(2 ** retry_count)  # Exponential backoff: 2s, 4s, 8s
+                            else:
+                                failed_batches += 1
+                                print(f"✗ Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}")
+                                break
+                    
+                except Exception as e:
+                    failed_batches += 1
+                    print(f"✗ Critical error in batch {i//batch_size + 1}: {e}")
+                    # Continue with next batch rather than failing completely
+                    continue
+        
+        total_time = time.time() - start_time
+        avg_rate = total_loaded / total_time if total_time > 0 else 0
+        
+        print(
+            f"Bulk loading complete: {total_loaded:,}/{len(edges_df):,} edges loaded "
+            f"in {total_time:.2f}s (avg rate: {avg_rate:.0f} edges/sec)"
+        )
+        
+        if failed_batches > 0:
+            print(f"⚠️  {failed_batches} batches failed during loading")
+        
+        return {
+            "total_edges": len(edges_df),
+            "loaded_edges": total_loaded,
+            "failed_batches": failed_batches,
+            "loading_time_seconds": round(total_time, 2),
+            "loading_rate_edges_per_second": round(avg_rate, 0),
+            "batch_size": batch_size,
+            "success_rate": round(total_loaded / len(edges_df) * 100, 1) if len(edges_df) > 0 else 0
+        }
+        
     finally:
         driver.close()

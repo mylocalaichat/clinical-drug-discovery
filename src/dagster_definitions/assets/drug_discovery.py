@@ -32,7 +32,7 @@ TEST_DISEASES = [
 def drug_discovery_results(
     context: AssetExecutionContext,
     clinical_validation_stats: Dict,
-    clinical_enrichment_stats: Dict,
+    clinical_pairs_loaded: Dict,
 ) -> pd.DataFrame:
     """Run drug discovery for multiple diseases and aggregate results."""
     context.log.info("Running drug discovery queries...")
@@ -48,19 +48,19 @@ def drug_discovery_results(
         # Run base query (graph topology only)
         base_results = query_base_drug_discovery(
             disease_id=disease_id,
-            neo4j_uri=os.getenv("NEO4J_URI"),
-            neo4j_user=os.getenv("NEO4J_USER"),
-            neo4j_password=os.getenv("NEO4J_PASSWORD"),
-            database=os.getenv("NEO4J_DATABASE"),
+            memgraph_uri=os.getenv("MEMGRAPH_URI"),
+            memgraph_user=os.getenv("MEMGRAPH_USER"),
+            memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+            database=os.getenv("MEMGRAPH_DATABASE"),
         )
 
         # Run enhanced query (with clinical evidence)
         enhanced_results = query_enhanced_drug_discovery(
             disease_id=disease_id,
-            neo4j_uri=os.getenv("NEO4J_URI"),
-            neo4j_user=os.getenv("NEO4J_USER"),
-            neo4j_password=os.getenv("NEO4J_PASSWORD"),
-            database=os.getenv("NEO4J_DATABASE"),
+            memgraph_uri=os.getenv("MEMGRAPH_URI"),
+            memgraph_user=os.getenv("MEMGRAPH_USER"),
+            memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+            database=os.getenv("MEMGRAPH_DATABASE"),
         )
 
         # Compare results
@@ -73,7 +73,7 @@ def drug_discovery_results(
             base_results=base_results,
             enhanced_results=enhanced_results,
             comparison=comparison,
-            clinical_enrichment_stats=clinical_enrichment_stats,
+            clinical_enrichment_stats=clinical_pairs_loaded,
             clinical_validation_stats=clinical_validation_stats,
         )
 

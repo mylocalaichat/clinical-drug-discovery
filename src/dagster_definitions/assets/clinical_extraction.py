@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Dict
 
+import mlflow
 import pandas as pd
 from dagster import AssetExecutionContext, MetadataValue, asset
 
@@ -31,30 +32,85 @@ def mtsamples_raw(context: AssetExecutionContext) -> pd.DataFrame:
 def clinical_drug_disease_pairs(
     context: AssetExecutionContext,
     mtsamples_raw: pd.DataFrame,
+    drug_features_loaded: Dict,  # Ensure drugs are loaded in Neo4j
+    disease_features_loaded: Dict,  # Ensure diseases are loaded in Neo4j
 ) -> pd.DataFrame:
     """Extract and normalize drug-disease co-occurrences using scispaCy NER."""
     context.log.info("Extracting and normalizing drug-disease pairs using NER...")
+    
+    # Log that data loading is complete
+    context.log.info(f"Data loading complete - drugs: {len(drug_features_loaded)} entities, diseases: {len(disease_features_loaded)} entities")
 
-    result, stats = extract_and_normalize_drug_disease_pairs(
-        notes_df=mtsamples_raw,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-        ner_model="en_ner_bc5cdr_md",
-        min_frequency=1,  # Lowered from 2 to see if we get any pairs at all
-        max_note_length=10000,
-    )
+    # Add environment diagnostics for spaCy model issues
+    import sys
+    import spacy
+    context.log.info(f"Python executable: {sys.executable}")
+    context.log.info(f"spaCy version: {spacy.__version__}")
+    
+    try:
+        import spacy.util
+        installed_models = spacy.util.get_installed_models()
+        context.log.info(f"Available spaCy models: {installed_models}")
+        
+        # Test model loading in Dagster context
+        if "en_ner_bc5cdr_md" in installed_models:
+            context.log.info("✓ en_ner_bc5cdr_md found in installed models")
+        else:
+            context.log.error(f"✗ en_ner_bc5cdr_md NOT found. Available: {installed_models}")
+            
+    except Exception as e:
+        context.log.error(f"Error checking spaCy models: {e}")
 
-    context.log.info(f"Extracted and normalized {len(result):,} drug-disease pairs")
+    # Set MLflow experiment
+    mlflow.set_experiment("clinical-drug-discovery")
 
-    # Save to CSV for inspection
-    output_file = "data/03_primary/clinical_drug_disease_pairs.csv"
-    result.to_csv(output_file, index=False)
+    with mlflow.start_run(run_name="clinical_extraction"):
+        # Log parameters
+        mlflow.log_params({
+            "ner_model": "en_ner_bc5cdr_md",
+            "min_frequency": 1,
+            "max_note_length": 10000,
+            "num_input_notes": len(mtsamples_raw),
+        })
 
-    # Get absolute path for display
-    output_path = Path(output_file).resolve()
-    context.log.info(f"Saved to: {output_path}")
+        result, stats = extract_and_normalize_drug_disease_pairs(
+            notes_df=mtsamples_raw,
+            memgraph_uri=os.getenv("MEMGRAPH_URI"),
+            memgraph_user=os.getenv("MEMGRAPH_USER"),
+            memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+            database=os.getenv("MEMGRAPH_DATABASE"),
+            ner_model="en_ner_bc5cdr_md",
+            min_frequency=1,
+            max_note_length=10000,
+        )
+
+        context.log.info(f"Extracted and normalized {len(result):,} drug-disease pairs")
+
+        # Log metrics to MLflow
+        mlflow.log_metrics({
+            "num_extracted_pairs": len(result),
+            "num_unique_drugs": result['drug_id'].nunique() if len(result) > 0 else 0,
+            "num_unique_diseases": result['disease_id'].nunique() if len(result) > 0 else 0,
+        })
+
+        # Log extraction stats
+        if "extraction_stats" in stats:
+            mlflow.log_metrics({
+                f"extraction_{k}": v for k, v in stats["extraction_stats"].items()
+                if isinstance(v, (int, float))
+            })
+
+        # Save to CSV for inspection
+        output_file = "data/03_primary/clinical_drug_disease_pairs.csv"
+        result.to_csv(output_file, index=False)
+
+        # Log artifact to MLflow
+        mlflow.log_artifact(output_file)
+
+        # Get absolute path for display
+        output_path = Path(output_file).resolve()
+        context.log.info(f"Saved to: {output_path}")
+        context.log.info(f"MLflow run ID: {mlflow.active_run().info.run_id}")
 
     # Add metadata to show in Dagster UI
     context.add_output_metadata({

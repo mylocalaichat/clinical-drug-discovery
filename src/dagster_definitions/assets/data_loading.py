@@ -1,5 +1,5 @@
 """
-Dagster assets for loading PrimeKG data into Neo4j.
+Dagster assets for loading PrimeKG data into Memgraph.
 """
 
 import os
@@ -11,11 +11,7 @@ from dotenv import load_dotenv
 
 from clinical_drug_discovery.lib.data_loading import (
     download_primekg_data,
-    load_disease_features_to_neo4j,
-    load_drug_features_to_neo4j,
-    load_edges_to_neo4j,
-    load_nodes_to_neo4j,
-    setup_neo4j_database,
+    setup_memgraph_database,
 )
 
 # Load environment variables
@@ -37,122 +33,301 @@ def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
 
 
 @asset(group_name="data_loading", compute_kind="database")
-def neo4j_database_ready(context: AssetExecutionContext, primekg_download_status: Dict) -> Dict[str, str]:
-    """Setup Neo4j database."""
-    context.log.info("Setting up Neo4j database...")
+def memgraph_database_ready(context: AssetExecutionContext, primekg_download_status: Dict) -> Dict[str, str]:
+    """Setup Memgraph database and clear all existing data."""
+    from neo4j import GraphDatabase
+    
+    context.log.info("Setting up Memgraph database...")
+    
+    # Connect to Memgraph and delete all existing nodes and edges
+    auth = None
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
 
-    result = setup_neo4j_database(
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-        fresh_start=True,
+    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+    
+    try:
+        with driver.session() as session:
+            # First check what's currently in the database
+            node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
+            edge_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()["count"]
+            
+            context.log.info(f"Found existing data - Nodes: {node_count:,}, Edges: {edge_count:,}")
+            
+            if node_count > 0 or edge_count > 0:
+                context.log.info("Performing complete database cleanup...")
+                
+                # Method 1: Use DETACH DELETE for complete cleanup (faster)
+                try:
+                    context.log.info("Using DETACH DELETE for complete cleanup...")
+                    session.run("MATCH (n) DETACH DELETE n", timeout=600)  # 10 minute timeout
+                    context.log.info("✓ DETACH DELETE completed successfully")
+                except Exception as e:
+                    context.log.warning(f"DETACH DELETE failed: {e}")
+                    context.log.info("Falling back to separate edge/node deletion...")
+                    
+                    # Method 2: Fallback - delete edges then nodes separately
+                    try:
+                        # Delete all relationships first
+                        context.log.info("Deleting all relationships...")
+                        session.run("MATCH ()-[r]->() DELETE r", timeout=300)
+                        context.log.info("✓ All relationships deleted")
+                        
+                        # Then delete all nodes
+                        context.log.info("Deleting all nodes...")
+                        session.run("MATCH (n) DELETE n", timeout=300)
+                        context.log.info("✓ All nodes deleted")
+                    except Exception as e2:
+                        context.log.error(f"Fallback deletion also failed: {e2}")
+                        raise e2
+            else:
+                context.log.info("Database is already empty, no cleanup needed")
+            
+            # Verify cleanup is complete
+            final_node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
+            final_edge_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()["count"]
+            
+            context.log.info(f"Database cleanup verified - Nodes: {final_node_count}, Edges: {final_edge_count}")
+            
+            if final_node_count > 0 or final_edge_count > 0:
+                raise Exception(f"Database cleanup incomplete! Still found {final_node_count} nodes and {final_edge_count} edges")
+            
+    finally:
+        driver.close()
+
+    # Now setup the database (but skip the cleanup since we already did it)
+    result = setup_memgraph_database(
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER"),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD"),
+        fresh_start=False,  # Set to False since we already cleaned up
     )
 
-    context.log.info(f"Database setup: {result['action']}")
+    context.log.info("Database setup complete - ready for fresh data loading")
     return result
 
 
-@asset(group_name="data_loading", compute_kind="neo4j")
+@asset(group_name="data_loading", compute_kind="database")
 def primekg_nodes_loaded(
     context: AssetExecutionContext,
-    neo4j_database_ready: Dict,
-    primekg_download_status: Dict,
-) -> Dict[str, int]:
-    """Load PrimeKG nodes into Neo4j by extracting them from the edges file."""
-    context.log.info("Loading PrimeKG nodes...")
+    memgraph_database_ready: Dict
+) -> Dict[str, Any]:
+    """Load PrimeKG nodes into Memgraph using optimized bulk loading operations."""
+    from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges, bulk_load_nodes_to_memgraph
 
-    # Read the kg.csv file (currently named nodes.csv) which contains edge triplets
-    context.log.info("Reading PrimeKG edges file...")
-    edges_df = pd.read_csv("data/01_raw/primekg/nodes.csv")
-    context.log.info(f"Read {len(edges_df):,} edges")
+    download_dir = "data/01_raw/primekg"
+    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
 
-    # Extract unique nodes from the edges
-    from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges
+    context.log.info(f"Loading edges to extract nodes from {edges_file}")
+    edges_df = pd.read_csv(edges_file)
+    context.log.info(f"Loaded {len(edges_df):,} edges")
+
+    # Extract unique nodes
     nodes_df = extract_nodes_from_edges(edges_df)
     context.log.info(f"Extracted {len(nodes_df):,} unique nodes")
 
-    # Load nodes to Neo4j
-    result = load_nodes_to_neo4j(
+    # Use optimized bulk loading with proper transaction management
+    context.log.info("Starting optimized bulk node loading...")
+    loading_stats = bulk_load_nodes_to_memgraph(
         nodes_df=nodes_df,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER", ""),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
+        batch_size=10000,  # Increased from 50000 for better memory management
+        timeout=600  # Increased to 10 minutes for large batches
     )
 
-    context.log.info(f"Loaded {result['nodes_in_db']} nodes")
-    return result
+    context.log.info(
+        f"Bulk loading complete: {loading_stats['loaded_nodes']:,}/{loading_stats['total_nodes']:,} nodes "
+        f"({loading_stats['success_rate']:.1f}% success rate) "
+        f"in {loading_stats['loading_time_seconds']}s "
+        f"at {loading_stats['loading_rate_nodes_per_second']} nodes/sec"
+    )
+
+    if loading_stats['failed_batches'] > 0:
+        context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
+
+    return {
+        "nodes_count": loading_stats['loaded_nodes'],
+        "node_types": nodes_df["node_type"].value_counts().to_dict(),
+        "download_dir": download_dir,
+        **loading_stats  # Include all loading statistics
+    }
 
 
-@asset(group_name="data_loading", compute_kind="neo4j")
+@asset(group_name="data_loading", compute_kind="database")
 def primekg_edges_loaded(
     context: AssetExecutionContext,
-    primekg_nodes_loaded: Dict,
-) -> Dict[str, int]:
-    """Load PrimeKG edges into Neo4j."""
-    context.log.info("Loading PrimeKG edges...")
+    primekg_nodes_loaded: Dict
+) -> Dict[str, Any]:
+    """Load PrimeKG edges/relationships into Memgraph using optimized bulk loading operations."""
+    from clinical_drug_discovery.lib.data_loading import bulk_load_edges_to_memgraph
 
-    # Read the kg.csv file (currently named nodes.csv) which contains edge triplets
-    context.log.info("Reading PrimeKG kg.csv (edges) file...")
-    edges_df = pd.read_csv("data/01_raw/primekg/nodes.csv")
-    context.log.info(f"Read {len(edges_df):,} edges")
+    download_dir = primekg_nodes_loaded["download_dir"]
+    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
 
-    result = load_edges_to_neo4j(
+    context.log.info(f"Loading edges from {edges_file}")
+    edges_df = pd.read_csv(edges_file)
+    context.log.info(f"Loaded {len(edges_df):,} edges")
+
+    # Use optimized bulk loading with proper transaction management
+    context.log.info("Starting optimized bulk edge loading...")
+    loading_stats = bulk_load_edges_to_memgraph(
         edges_df=edges_df,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
+        memgraph_uri=os.getenv("MEMGRAPH_URI"),
+        memgraph_user=os.getenv("MEMGRAPH_USER", ""),
+        memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
+        batch_size=10000,  # Increased from 5000 for better performance
+        timeout=600  # Increased to 10 minutes for large batches
     )
 
-    context.log.info(f"Loaded {result['edges_in_db']} edges")
-    return result
+    context.log.info(
+        f"Bulk loading complete: {loading_stats['loaded_edges']:,}/{loading_stats['total_edges']:,} edges "
+        f"({loading_stats['success_rate']:.1f}% success rate) "
+        f"in {loading_stats['loading_time_seconds']}s "
+        f"at {loading_stats['loading_rate_edges_per_second']} edges/sec"
+    )
+
+    if loading_stats['failed_batches'] > 0:
+        context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
+
+    return {
+        "edges_count": loading_stats['loaded_edges'],
+        "relation_types": edges_df["relation"].value_counts().to_dict(),
+        "download_dir": download_dir,
+        **loading_stats  # Include all loading statistics
+    }
 
 
-@asset(group_name="data_loading", compute_kind="neo4j")
+@asset(group_name="data_loading", compute_kind="database")
 def drug_features_loaded(
     context: AssetExecutionContext,
-    primekg_edges_loaded: Dict,
-) -> Dict[str, int]:
-    """Load drug features into Neo4j."""
-    context.log.info("Loading drug features...")
+    primekg_edges_loaded: Dict
+) -> Dict[str, Any]:
+    """Load drug features into Memgraph."""
+    from neo4j import GraphDatabase
 
-    # Read drug features from edges.csv (tab-separated)
-    # Note: Harvard Dataverse file naming is swapped - edges.csv contains drug features
-    drug_features_df = pd.read_csv("data/01_raw/primekg/edges.csv", sep='\t')
+    download_dir = primekg_edges_loaded["download_dir"]
+    # Note: edges.csv actually contains drug features (see download function comments)
+    drug_features_file = os.path.join(download_dir, "edges.csv")
 
-    result = load_drug_features_to_neo4j(
-        drug_features_df=drug_features_df,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-    )
+    context.log.info(f"Loading drug features from {drug_features_file}")
 
-    context.log.info(f"Loaded {result['drug_features_processed']} drug features")
-    return result
+    # Drug features file is tab-separated
+    drug_df = pd.read_csv(drug_features_file, sep="\t")
+    context.log.info(f"Loaded {len(drug_df):,} drug feature records")
+
+    # Connect to Memgraph
+    auth = None
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+
+    try:
+        with driver.session() as session:
+            # Add drug features to existing nodes
+            batch_size = 10000  # Increased from 1000 for better performance
+            loaded_count = 0
+
+            for i in range(0, len(drug_df), batch_size):
+                batch = drug_df.iloc[i:i+batch_size]
+
+                for _, row in batch.iterrows():
+                    # Match drug node and add features
+                    node_id = str(row.iloc[0]) if len(row) > 0 else None
+                    if node_id:
+                        # Create properties dictionary from all columns
+                        props = {f"drug_{col}": str(val) for col, val in row.items() if pd.notna(val)}
+
+                        session.run("""
+                            MATCH (n:Node {node_id: $node_id})
+                            SET n += $props,
+                                n.has_drug_features = true
+                        """, {
+                            "node_id": node_id,
+                            "props": props
+                        })
+                        loaded_count += 1
+
+                context.log.info(f"Processed {min(i+batch_size, len(drug_df)):,}/{len(drug_df):,} drug features")
+
+        context.log.info(f"Successfully loaded drug features for {loaded_count:,} drugs")
+
+        return {
+            "drug_features_count": loaded_count,
+            "total_records": len(drug_df)
+        }
+
+    finally:
+        driver.close()
 
 
-@asset(group_name="data_loading", compute_kind="neo4j")
+@asset(group_name="data_loading", compute_kind="database")
 def disease_features_loaded(
     context: AssetExecutionContext,
-    primekg_edges_loaded: Dict,
-) -> Dict[str, int]:
-    """Load disease features into Neo4j."""
-    context.log.info("Loading disease features...")
+    primekg_edges_loaded: Dict
+) -> Dict[str, Any]:
+    """Load disease features into Memgraph."""
+    from neo4j import GraphDatabase
 
-    # Read disease features from drug_features.csv (tab-separated)
-    # Note: Harvard Dataverse file naming is swapped - drug_features.csv contains disease features
-    disease_features_df = pd.read_csv("data/01_raw/primekg/drug_features.csv", sep='\t')
+    download_dir = primekg_edges_loaded["download_dir"]
+    # Note: drug_features.csv actually contains disease features (see download function comments)
+    disease_features_file = os.path.join(download_dir, "drug_features.csv")
 
-    result = load_disease_features_to_neo4j(
-        disease_features_df=disease_features_df,
-        neo4j_uri=os.getenv("NEO4J_URI"),
-        neo4j_user=os.getenv("NEO4J_USER"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD"),
-        database=os.getenv("NEO4J_DATABASE"),
-    )
+    context.log.info(f"Loading disease features from {disease_features_file}")
 
-    context.log.info(f"Loaded {result['disease_features_processed']} disease features")
-    return result
+    # Disease features file is tab-separated
+    disease_df = pd.read_csv(disease_features_file, sep="\t")
+    context.log.info(f"Loaded {len(disease_df):,} disease feature records")
+
+    # Connect to Memgraph
+    auth = None
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(os.getenv("MEMGRAPH_URI"), auth=auth)
+
+    try:
+        with driver.session() as session:
+            # Add disease features to existing nodes
+            batch_size = 10000  # Increased from 1000 for better performance
+            loaded_count = 0
+
+            for i in range(0, len(disease_df), batch_size):
+                batch = disease_df.iloc[i:i+batch_size]
+
+                for _, row in batch.iterrows():
+                    # Match disease node and add features
+                    node_id = str(row.iloc[0]) if len(row) > 0 else None
+                    if node_id:
+                        # Create properties dictionary from all columns
+                        props = {f"disease_{col}": str(val) for col, val in row.items() if pd.notna(val)}
+
+                        session.run("""
+                            MATCH (n:Node {node_id: $node_id})
+                            SET n += $props,
+                                n.has_disease_features = true
+                        """, {
+                            "node_id": node_id,
+                            "props": props
+                        })
+                        loaded_count += 1
+
+                context.log.info(f"Processed {min(i+batch_size, len(disease_df)):,}/{len(disease_df):,} disease features")
+
+        context.log.info(f"Successfully loaded disease features for {loaded_count:,} diseases")
+
+        return {
+            "disease_features_count": loaded_count,
+            "total_records": len(disease_df)
+        }
+
+    finally:
+        driver.close()
