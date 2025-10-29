@@ -17,10 +17,10 @@ class PrimeKGNameMatcher:
     Leverages built-in synonyms in PrimeKG descriptions and fuzzy matching.
     """
     
-    def __init__(self, neo4j_uri: str, neo4j_user: str, neo4j_password: str, database: str = "primekg"):
-        self.neo4j_uri = neo4j_uri
-        self.neo4j_user = neo4j_user
-        self.neo4j_password = neo4j_password
+    def __init__(self, memgraph_uri: str, memgraph_user: str, memgraph_password: str, database: str = "memgraph"):
+        self.memgraph_uri = memgraph_uri
+        self.memgraph_user = memgraph_user
+        self.memgraph_password = memgraph_password
         self.database = database
         
         # Caches for performance
@@ -34,7 +34,7 @@ class PrimeKGNameMatcher:
         if self._loaded:
             return
             
-        driver = GraphDatabase.driver(self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password))
+        driver = GraphDatabase.driver(self.memgraph_uri, auth=(self.memgraph_user, self.memgraph_password))
         
         try:
             with driver.session(database=self.database) as session:
@@ -307,7 +307,10 @@ class PrimeKGNameMatcher:
                 stats['total_dropped'] += 1
                 print(f"  Dropped: {drug_name} -> {disease_name} (drug_match: {bool(drug_id)}, disease_match: {bool(disease_id)})")
         
-        normalized_df = pd.DataFrame(normalized_pairs)
+        # Create DataFrame with explicit columns to handle empty case
+        normalized_df = pd.DataFrame(normalized_pairs, columns=[
+            'drug_id', 'disease_id', 'score', 'original_drug_name', 'original_disease_name'
+        ])
         
         print(f"\nNormalization Results:")
         print(f"  Total pairs: {stats['total_pairs']}")
@@ -320,7 +323,7 @@ class PrimeKGNameMatcher:
     
     def get_database_entity_info(self, entity_id: str, entity_type: str) -> Optional[Dict]:
         """Get detailed information about a database entity."""
-        driver = GraphDatabase.driver(self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password))
+        driver = GraphDatabase.driver(self.memgraph_uri, auth=(self.memgraph_user, self.memgraph_password))
         
         try:
             with driver.session(database=self.database) as session:
@@ -346,6 +349,6 @@ class PrimeKGNameMatcher:
         return None
 
 
-def create_name_matcher(neo4j_uri: str, neo4j_user: str, neo4j_password: str, database: str = "primekg") -> PrimeKGNameMatcher:
-    """Factory function to create a name matcher instance."""
-    return PrimeKGNameMatcher(neo4j_uri, neo4j_user, neo4j_password, database)
+def create_name_matcher(memgraph_uri: str, memgraph_user: str, memgraph_password: str, database: str = "memgraph") -> PrimeKGNameMatcher:
+    """Create a name matcher instance."""
+    return PrimeKGNameMatcher(memgraph_uri, memgraph_user, memgraph_password, database)

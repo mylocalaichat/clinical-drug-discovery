@@ -11,25 +11,25 @@ from neo4j import GraphDatabase
 
 def query_base_drug_discovery(
     disease_id: str,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
+    database: str = "memgraph",
 ) -> pd.DataFrame:
     """
     Run base topology-only drug discovery query.
 
     Args:
         disease_id: Target disease ID
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
 
     Returns:
         DataFrame with drug discovery results
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
 
     try:
         print(f"\nRunning base discovery query for disease ID: {disease_id}")
@@ -81,25 +81,25 @@ def query_base_drug_discovery(
 
 def query_enhanced_drug_discovery(
     disease_id: str,
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
-    database: str = "primekg",
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
+    database: str = "memgraph",
 ) -> pd.DataFrame:
     """
     Run enhanced drug discovery query with clinical evidence.
 
     Args:
         disease_id: Target disease ID
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
 
     Returns:
         DataFrame with drug discovery results including clinical evidence
     """
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(memgraph_uri, auth=(memgraph_user, memgraph_password))
 
     try:
         print(f"\nRunning enhanced discovery query for disease ID: {disease_id}")
@@ -293,9 +293,9 @@ def log_results_to_mlflow(
 
 def run_multi_disease_discovery(
     disease_list: List[Dict[str, str]],
-    neo4j_uri: str,
-    neo4j_user: str,
-    neo4j_password: str,
+    memgraph_uri: str,
+    memgraph_user: str,
+    memgraph_password: str,
     database: str,
     clinical_enrichment_stats: Dict,
     clinical_validation_stats: Dict,
@@ -305,9 +305,9 @@ def run_multi_disease_discovery(
 
     Args:
         disease_list: List of dicts with disease_id and name
-        neo4j_uri: Neo4j connection URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
+        memgraph_uri: Memgraph connection URI
+        memgraph_user: Memgraph username
+        memgraph_password: Memgraph password
         database: Database name
         clinical_enrichment_stats: Stats from enrichment
         clinical_validation_stats: Validation stats
@@ -326,8 +326,8 @@ def run_multi_disease_discovery(
         print(f"{'='*60}")
 
         # Run queries
-        base_results = query_base_drug_discovery(disease_id, neo4j_uri, neo4j_user, neo4j_password, database)
-        enhanced_results = query_enhanced_drug_discovery(disease_id, neo4j_uri, neo4j_user, neo4j_password, database)
+        base_results = query_base_drug_discovery(disease_id, memgraph_uri, memgraph_user, memgraph_password, database)
+        enhanced_results = query_enhanced_drug_discovery(disease_id, memgraph_uri, memgraph_user, memgraph_password, database)
         comparison = compare_discovery_results(base_results, enhanced_results)
 
         # Log to MLflow
