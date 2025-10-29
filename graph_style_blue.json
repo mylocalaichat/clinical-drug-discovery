@@ -1,0 +1,28 @@
+{
+  "graph-style-sheet": {
+    "node": {
+      "color": "#3B82F6",
+      "border-width": 2,
+      "border-color": "#1E40AF",
+      "label": {
+        "color": "#1F2937",
+        "font-size": 12,
+        "position": "bottom"
+      },
+      "size": 40
+    },
+    "relationship": {
+      "color": "#6B7280",
+      "width": 2,
+      "label": {
+        "color": "#4B5563",
+        "font-size": 10
+      }
+    },
+    "node.Node": {
+      "color": "#3B82F6",
+      "border-color": "#1E40AF"
+    }
+  },
+  "style": "@NodeStyle {\n  size: 40;\n  border-width: 2px;\n  border-color: #1E40AF;\n  color: #3B82F6;\n  label: {\n    font-size: 12px;\n    color: #1F2937;\n  }\n}\n\n@EdgeStyle {\n  width: 2px;\n  color: #6B7280;\n  label: {\n    font-size: 10px;\n    color: #4B5563;\n  }\n}"
+}
