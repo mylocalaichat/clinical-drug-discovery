@@ -28,6 +28,17 @@ from .embeddings import (
     random_graph_sample,
 )
 from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
+from .xgboost_drug_discovery import (
+    xgboost_all_drug_disease_pairs,
+    xgboost_feature_vectors,
+    xgboost_known_drug_disease_pairs,
+    xgboost_model_evaluation,
+    xgboost_node_embeddings,
+    xgboost_predictions,
+    xgboost_ranked_results,
+    xgboost_trained_model,
+    xgboost_training_data,
+)
 
 # TODO: Enable link prediction assets after installing OpenMP (brew install libomp)
 # from .link_prediction import (
@@ -68,6 +79,16 @@ __all__ = [
     "node2vec_embeddings",
     "flattened_embeddings",
     "embedding_visualizations",
+    # XGBoost Drug Discovery
+    "xgboost_known_drug_disease_pairs",
+    "xgboost_node_embeddings",
+    "xgboost_training_data",
+    "xgboost_feature_vectors",
+    "xgboost_trained_model",
+    "xgboost_model_evaluation",
+    "xgboost_all_drug_disease_pairs",
+    "xgboost_predictions",
+    "xgboost_ranked_results",
     # Link Prediction (disabled until OpenMP installed)
     # "link_prediction_drugs",
     # "link_prediction_diseases",
