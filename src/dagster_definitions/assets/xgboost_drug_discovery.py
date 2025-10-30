@@ -2,8 +2,8 @@
 Dagster assets for XGBoost-based drug discovery pipeline.
 
 This module implements the complete drug-disease prediction pipeline:
-1. Load known drug-disease relationships
-2. Create training data (positive/negative samples)
+1. Load known drug-disease relationships (positive: indications, negative: contraindications)
+2. Create training data using indication and contraindication relationships
 3. Feature engineering (flatten embeddings)
 4. Train XGBoost classifier
 5. Evaluate model performance
@@ -11,342 +11,214 @@ This module implements the complete drug-disease prediction pipeline:
 7. Rank and output results
 """
 
-import os
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 from dagster import AssetExecutionContext, asset
-from neo4j import GraphDatabase
 from sklearn.metrics import classification_report, precision_recall_curve, roc_auc_score, auc
 from sklearn.model_selection import KFold, cross_val_score, train_test_split
 from xgboost import XGBClassifier
-import random
 
 
-# =====================================================================
-# ASSET 1: Load Known Drug-Disease Relationships
-# =====================================================================
-
-@asset(group_name="xgboost_drug_discovery", compute_kind="database")
-def xgboost_known_drug_disease_pairs(
-    context: AssetExecutionContext,
-) -> pd.DataFrame:
-    """Load known drug-disease treatment relationships from Memgraph."""
-    context.log.info("Loading known drug-disease relationships...")
-
-    # Get Memgraph connection
-    memgraph_uri = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
-    memgraph_user = os.getenv("MEMGRAPH_USER", "")
-    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
-
-    auth = None
-    if memgraph_user or memgraph_password:
-        auth = (memgraph_user, memgraph_password)
-
-    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
-
-    try:
-        with driver.session() as session:
-            result = session.run("""
-                MATCH (drug:Node)-[r:RELATES {relation: 'drug_treats_disease'}]->(disease:Node)
-                WHERE drug.is_example = true AND disease.is_example = true
-                RETURN drug.node_id as drug_id,
-                       drug.node_name as drug_name,
-                       disease.node_id as disease_id,
-                       disease.node_name as disease_name
-            """)
-
-            known_pairs = []
-            for record in result:
-                known_pairs.append({
-                    'drug_id': record['drug_id'],
-                    'drug_name': record['drug_name'],
-                    'disease_id': record['disease_id'],
-                    'disease_name': record['disease_name'],
-                    'label': 1  # Known treatment
-                })
-    finally:
-        driver.close()
-
-    df = pd.DataFrame(known_pairs)
-
-    context.add_output_metadata({
-        "num_known_relationships": len(df),
-        "unique_drugs": df['drug_id'].nunique(),
-        "unique_diseases": df['disease_id'].nunique(),
-        "sample_pairs": df[['drug_name', 'disease_name']].head(5).to_dict('records')
-    })
-
-    context.log.info(f"Loaded {len(df)} known treatment relationships")
-
-    return df
+# NOTE: `xgboost_known_drug_disease_pairs` removed — its functionality is consolidated
+# into `xgboost_train_test_split` which reads edges and joins embeddings in one asset.
 
 
-# =====================================================================
-# ASSET 2: Load Embeddings from Memgraph
-# =====================================================================
 
-@asset(group_name="xgboost_drug_discovery", compute_kind="database")
-def xgboost_node_embeddings(
-    context: AssetExecutionContext,
-    flattened_embeddings: pd.DataFrame,  # Depends on embeddings being ready
-) -> Dict[str, Dict[str, Any]]:
-    """Load all node embeddings from Memgraph (after embeddings pipeline completes)."""
-    context.log.info("Loading node embeddings from Memgraph...")
-    context.log.info(f"Embeddings pipeline provided {len(flattened_embeddings)} flattened embeddings")
-
-    # Get Memgraph connection
-    memgraph_uri = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
-    memgraph_user = os.getenv("MEMGRAPH_USER", "")
-    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
-
-    auth = None
-    if memgraph_user or memgraph_password:
-        auth = (memgraph_user, memgraph_password)
-
-    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
-
-    try:
-        with driver.session() as session:
-            result = session.run("""
-                MATCH (n)
-                WHERE EXISTS(n.embedding) AND n.is_example = true
-                RETURN n.node_id as id,
-                       n.node_name as name,
-                       n.node_type as type,
-                       n.embedding as embedding
-            """)
-
-            embeddings = {}
-            for record in result:
-                embeddings[record['id']] = {
-                    'name': record['name'],
-                    'type': record['type'],
-                    'embedding': np.array(record['embedding'])
-                }
-    finally:
-        driver.close()
-
-    # Separate by type
-    drugs = {k: v for k, v in embeddings.items() if v['type'] == 'drug'}
-    diseases = {k: v for k, v in embeddings.items() if v['type'] == 'disease'}
-
-    embedding_dim = len(list(embeddings.values())[0]['embedding']) if embeddings else 0
-
-    context.add_output_metadata({
-        "total_nodes_with_embeddings": len(embeddings),
-        "num_drugs": len(drugs),
-        "num_diseases": len(diseases),
-        "embedding_dimensions": embedding_dim
-    })
-
-    context.log.info(f"Loaded embeddings for {len(embeddings)} nodes ({len(drugs)} drugs, {len(diseases)} diseases)")
-
-    return embeddings
-
-
-# =====================================================================
-# ASSET 3: Create Training Dataset
-# =====================================================================
-
-@asset(group_name="xgboost_drug_discovery", compute_kind="transform")
-def xgboost_training_data(
-    context: AssetExecutionContext,
-    xgboost_known_drug_disease_pairs: pd.DataFrame,
-    xgboost_node_embeddings: Dict[str, Dict[str, Any]],
-) -> pd.DataFrame:
-    """Create training dataset with positive, negative, and unknown samples."""
-    context.log.info("Creating training dataset...")
-
-    embeddings = xgboost_node_embeddings
-    known_df = xgboost_known_drug_disease_pairs
-
-    # Get drug and disease IDs
-    drugs = {k: v for k, v in embeddings.items() if v['type'] == 'drug'}
-    diseases = {k: v for k, v in embeddings.items() if v['type'] == 'disease'}
-
-    drug_ids = list(drugs.keys())
-    disease_ids = list(diseases.keys())
-
-    # Create set of known pairs
-    known_set = {(row['drug_id'], row['disease_id']) for _, row in known_df.iterrows()}
-
-    # Positive samples
-    positive_samples = known_df.copy()
-    positive_samples['type'] = 'positive'
-    positive_samples['label'] = 1
-
-    # Negative samples (random non-treatments)
-    negative_ratio = 1.0  # Same number as positives
-    n_negatives = int(len(positive_samples) * negative_ratio)
-
-    negative_samples = []
-    attempts = 0
-    max_attempts = n_negatives * 10
-
-    while len(negative_samples) < n_negatives and attempts < max_attempts:
-        drug_id = random.choice(drug_ids)
-        disease_id = random.choice(disease_ids)
-
-        if (drug_id, disease_id) not in known_set:
-            negative_samples.append({
-                'drug_id': drug_id,
-                'disease_id': disease_id,
-                'drug_name': embeddings[drug_id]['name'],
-                'disease_name': embeddings[disease_id]['name'],
-                'type': 'negative',
-                'label': 0
-            })
-        attempts += 1
-
-    negative_df = pd.DataFrame(negative_samples)
-
-    # Unknown samples (synthetic)
-    unknown_ratio = 0.5
-    n_unknowns = int(len(positive_samples) * unknown_ratio)
-
-    unknown_samples = []
-    attempts = 0
-    max_attempts = n_unknowns * 10
-
-    while len(unknown_samples) < n_unknowns and attempts < max_attempts:
-        drug_id = random.choice(drug_ids)
-        disease_id = random.choice(disease_ids)
-
-        if (drug_id, disease_id) not in known_set:
-            unknown_samples.append({
-                'drug_id': drug_id,
-                'disease_id': disease_id,
-                'drug_name': embeddings[drug_id]['name'],
-                'disease_name': embeddings[disease_id]['name'],
-                'type': 'unknown',
-                'label': 2
-            })
-        attempts += 1
-
-    unknown_df = pd.DataFrame(unknown_samples)
-
-    # Combine all samples
-    training_data = pd.concat([positive_samples, negative_df, unknown_df], ignore_index=True)
-    training_data = training_data.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle
-
-    context.add_output_metadata({
-        "total_samples": len(training_data),
-        "positive_samples": len(positive_samples),
-        "negative_samples": len(negative_df),
-        "unknown_samples": len(unknown_df),
-        "positive_ratio": f"{len(positive_samples)/len(training_data):.2%}",
-        "negative_ratio": f"{len(negative_df)/len(training_data):.2%}",
-        "unknown_ratio": f"{len(unknown_df)/len(training_data):.2%}"
-    })
-
-    context.log.info(f"Created {len(training_data)} training samples")
-    context.log.info(f"  Positive: {len(positive_samples)} ({len(positive_samples)/len(training_data)*100:.1f}%)")
-    context.log.info(f"  Negative: {len(negative_df)} ({len(negative_df)/len(training_data)*100:.1f}%)")
-    context.log.info(f"  Unknown: {len(unknown_df)} ({len(unknown_df)/len(training_data)*100:.1f}%)")
-
-    return training_data
+# NOTE: `xgboost_training_data` removed — its functionality is consolidated
+# into `xgboost_train_test_split` which reads edges and joins embeddings in one asset.
 
 
 # =====================================================================
 # ASSET 4: Feature Engineering (Flatten Embeddings)
 # =====================================================================
+# =====================================================================
+
+# NOTE: `xgboost_feature_vectors` removed — its functionality is consolidated
+# into `xgboost_train_test_split` which reads edges and joins embeddings in one asset.
+
+
+# =====================================================================
+# ASSET 5: Train/Test Split
+# =====================================================================
 
 @asset(group_name="xgboost_drug_discovery", compute_kind="transform")
-def xgboost_feature_vectors(
+def xgboost_train_test_split(
     context: AssetExecutionContext,
-    xgboost_training_data: pd.DataFrame,
-    xgboost_node_embeddings: Dict[str, Dict[str, Any]],
+    flattened_embeddings: pd.DataFrame,
 ) -> Dict[str, Any]:
-    """Create feature vectors by concatenating drug and disease embeddings."""
-    context.log.info("Creating feature vectors...")
+    """Read edges CSV, join embeddings, build feature vectors, and split into train/test.
 
-    embeddings = xgboost_node_embeddings
-    training_data = xgboost_training_data
+    Outputs CSVs for train and test datasets and returns arrays and sample DataFrames.
+    """
+    context.log.info("Creating training and test datasets from edges CSV + flattened embeddings...")
 
-    X = []
-    y = []
-    valid_samples = []
+    edges_file = "data/01_raw/primekg/edges.csv"
+    try:
+        edges_df = pd.read_csv(edges_file)
+        context.log.info(f"Loaded {len(edges_df):,} total edges from {edges_file}")
+    except FileNotFoundError:
+        context.log.error(f"Edges file not found: {edges_file}")
+        return {}
+    except Exception as e:
+        context.log.error(f"Error reading edges CSV: {e}")
+        return {}
 
-    for _, row in training_data.iterrows():
-        drug_id = row['drug_id']
-        disease_id = row['disease_id']
+    # Filter for indication and contraindication relationships between drugs and diseases
+    relation_df = edges_df[
+        ((edges_df['relation'] == 'indication') | (edges_df['relation'] == 'contraindication')) &
+        (edges_df['x_type'] == 'drug') &
+        (edges_df['y_type'] == 'disease')
+    ].copy()
 
-        if drug_id in embeddings and disease_id in embeddings:
-            # Get embeddings
-            drug_emb = embeddings[drug_id]['embedding']
-            disease_emb = embeddings[disease_id]['embedding']
+    context.log.info(f"Filtered to {len(relation_df):,} drug-disease edges (indication/contraindication)")
 
-            # Concatenate
-            feature_vector = np.concatenate([drug_emb, disease_emb])
+    # Build known pairs list
+    known_pairs = []
+    for _, row in relation_df.iterrows():
+        label = 1 if row['relation'] == 'indication' else 0
+        known_pairs.append({
+            'drug_id': str(row['x_id']),
+            'drug_name': str(row.get('x_name', '')),
+            'disease_id': str(row['y_id']),
+            'disease_name': str(row.get('y_name', '')),
+            'label': label,
+            'relationship_type': row['relation']
+        })
 
-            X.append(feature_vector)
-            y.append(row['label'])
-            valid_samples.append(row.to_dict())
+    if not known_pairs:
+        context.log.warning("No known drug-disease pairs found in edges CSV")
+        return {}
 
-    X = np.array(X)
-    y = np.array(y)
-    samples_df = pd.DataFrame(valid_samples)
+    known_df = pd.DataFrame(known_pairs)
 
-    embedding_dim = len(embeddings[list(embeddings.keys())[0]]['embedding'])
+    # Build embeddings lookup
+    embedding_cols = [c for c in flattened_embeddings.columns if c.startswith('emb_')]
+    if not embedding_cols:
+        raise ValueError("No embedding columns found in flattened_embeddings DataFrame")
 
+    embeddings_dict = {}
+    for _, row in flattened_embeddings.iterrows():
+        embeddings_dict[str(row['node_id'])] = row[embedding_cols].values.astype(np.float32)
+
+    context.log.info(f"Created embeddings lookup for {len(embeddings_dict)} nodes")
+
+    # Build samples with concatenated embeddings
+    X_list = []
+    y_list = []
+    samples = []
+
+    for _, row in known_df.iterrows():
+        d_id = str(row['drug_id'])
+        dis_id = str(row['disease_id'])
+        if d_id in embeddings_dict and dis_id in embeddings_dict:
+            drug_emb = embeddings_dict[d_id]
+            dis_emb = embeddings_dict[dis_id]
+            feat = np.concatenate([drug_emb, dis_emb])
+            X_list.append(feat)
+            y_list.append(int(row['label']))
+            samples.append({
+                'drug_id': d_id,
+                'disease_id': dis_id,
+                'drug_name': row['drug_name'],
+                'disease_name': row['disease_name'],
+                'label': int(row['label']),
+                'relationship_type': row['relationship_type']
+            })
+
+    if len(X_list) == 0:
+        context.log.warning("No samples with embeddings found. Aborting.")
+        return {}
+
+    X = np.vstack(X_list)
+    y = np.array(y_list)
+    samples_df = pd.DataFrame(samples)
+
+    # Train/test split
+    X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+        X, y, samples_df.index.values, test_size=0.2, random_state=42, stratify=y
+    )
+
+    samples_train = samples_df.loc[idx_train].reset_index(drop=True)
+    samples_test = samples_df.loc[idx_test].reset_index(drop=True)
+
+    # Attach features as lists for CSV output
+    samples_train = samples_train.copy()
+    samples_train['features'] = [list(x) for x in X_train]
+    samples_train['label'] = y_train
+
+    samples_test = samples_test.copy()
+    samples_test['features'] = [list(x) for x in X_test]
+    samples_test['label'] = y_test
+
+    # Save CSVs
+    output_dir = Path("data/07_model_output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_file = output_dir / "xgboost_train_set.csv"
+    test_file = output_dir / "xgboost_test_set.csv"
+    samples_train.to_csv(train_file, index=False)
+    samples_test.to_csv(test_file, index=False)
+
+    # Add metadata including file URIs
     context.add_output_metadata({
-        "feature_matrix_shape": str(X.shape),
-        "num_samples": X.shape[0],
-        "num_features": X.shape[1],
-        "drug_embedding_dim": embedding_dim,
-        "disease_embedding_dim": embedding_dim,
-        "label_distribution": {
-            "class_0": int(sum(y == 0)),
-            "class_1": int(sum(y == 1)),
-            "class_2": int(sum(y == 2))
+        'train_file_uri': str(train_file.resolve()),
+        'test_file_uri': str(test_file.resolve()),
+        'train_samples': len(X_train),
+        'test_samples': len(X_test),
+        'train_label_distribution': {
+            'indications_1': int(sum(y_train == 1)),
+            'contraindications_0': int(sum(y_train == 0))
+        },
+        'test_label_distribution': {
+            'indications_1': int(sum(y_test == 1)),
+            'contraindications_0': int(sum(y_test == 0))
         }
     })
 
-    context.log.info(f"Created feature matrix: {X.shape}")
-    context.log.info(f"  Features: {X.shape[1]} ({embedding_dim} drug + {embedding_dim} disease)")
+    context.log.info(f"Saved train/test CSVs: {train_file}, {test_file}")
 
     return {
-        'X': X,
-        'y': y,
-        'samples': samples_df
+        'X_train': X_train,
+        'X_test': X_test,
+        'y_train': y_train,
+        'y_test': y_test,
+        'train_file': str(train_file.resolve()),
+        'test_file': str(test_file.resolve()),
+        'samples_train': samples_train,
+        'samples_test': samples_test,
     }
 
 
 # =====================================================================
-# ASSET 5: Train XGBoost Model
+# ASSET 6: Train XGBoost Model
 # =====================================================================
 
 @asset(group_name="xgboost_drug_discovery", compute_kind="ml")
 def xgboost_trained_model(
     context: AssetExecutionContext,
-    xgboost_feature_vectors: Dict[str, Any],
+    xgboost_train_test_split: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Train XGBoost classifier with cross-validation."""
     context.log.info("Training XGBoost model...")
 
-    X = xgboost_feature_vectors['X']
-    y = xgboost_feature_vectors['y']
+    X_train = xgboost_train_test_split['X_train']
+    y_train = xgboost_train_test_split['y_train']
+    X_test = xgboost_train_test_split['X_test']
+    y_test = xgboost_train_test_split['y_test']
 
-    # Train/test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    # Initialize model
+    # Initialize model for binary classification (0=contraindication, 1=indication)
     model = XGBClassifier(
         n_estimators=100,
         max_depth=6,
         learning_rate=0.1,
         subsample=0.8,
         colsample_bytree=0.8,
-        objective='multi:softprob',
-        num_class=3,
+        objective='binary:logistic',
         random_state=42,
         n_jobs=-1,
-        eval_metric='mlogloss'
+        eval_metric='logloss'
     )
 
     # Cross-validation
@@ -415,26 +287,52 @@ def xgboost_model_evaluation(
     X_test = xgboost_trained_model['X_test']
     y_test = xgboost_trained_model['y_test']
 
+    # Debug logging for input data
+    context.log.info(f"X_test shape: {X_test.shape}")
+    context.log.info(f"y_test shape before prediction: {y_test.shape}")
+    context.log.info(f"y_test type: {type(y_test)}")
+
     # Predictions
     y_pred = model.predict(X_test)
     y_pred_proba = model.predict_proba(X_test)
 
-    # Classification report
+    # Debug logging for predictions
+    context.log.info(f"y_pred shape after prediction: {y_pred.shape}")
+    context.log.info(f"y_pred_proba shape: {y_pred_proba.shape}")
+
+    # Ensure y_test and y_pred are 1D arrays (fix for multilabel-indicator error)
+    y_test = np.asarray(y_test).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    # Debug logging
+    context.log.info(f"y_test shape after flatten: {y_test.shape}, dtype: {y_test.dtype}")
+    context.log.info(f"y_pred shape after flatten: {y_pred.shape}, dtype: {y_pred.dtype}")
+    context.log.info(f"y_test unique values: {np.unique(y_test)}")
+    context.log.info(f"y_pred unique values: {np.unique(y_pred)}")
+
+    # Additional safety check - truncate to minimum length if sizes don't match
+    min_len = min(len(y_test), len(y_pred))
+    if len(y_test) != len(y_pred):
+        context.log.warning(f"Size mismatch: y_test={len(y_test)}, y_pred={len(y_pred)}. Truncating to {min_len}")
+        y_test = y_test[:min_len]
+        y_pred = y_pred[:min_len]
+        y_pred_proba_class1 = y_pred_proba[:min_len, 1]
+    else:
+        y_pred_proba_class1 = y_pred_proba[:, 1]
+
+    # Classification report for binary classification
     report = classification_report(
         y_test, y_pred,
-        target_names=['Does NOT Treat (0)', 'TREATS (1)', 'Unknown (2)'],
+        target_names=['Contraindication (0)', 'Indication (1)'],
         output_dict=True,
         zero_division=0
     )
 
-    # ROC-AUC for binary classification (class 1 vs rest)
-    y_test_binary = (y_test == 1).astype(int)
-    y_pred_binary = y_pred_proba[:, 1]
-
-    roc_auc = float(roc_auc_score(y_test_binary, y_pred_binary))
+    # ROC-AUC for binary classification
+    roc_auc = float(roc_auc_score(y_test, y_pred_proba_class1))
 
     # Precision-Recall AUC
-    precision, recall, _ = precision_recall_curve(y_test_binary, y_pred_binary)
+    precision, recall, _ = precision_recall_curve(y_test, y_pred_proba_class1)
     pr_auc = float(auc(recall, precision))
 
     # Log results
@@ -446,14 +344,17 @@ def xgboost_model_evaluation(
             context.log.info(f"    Recall: {metrics['recall']:.3f}")
             context.log.info(f"    F1-score: {metrics['f1-score']:.3f}")
 
-    context.log.info(f"\nROC-AUC (TREATS vs rest): {roc_auc:.4f}")
+    context.log.info(f"\nROC-AUC: {roc_auc:.4f}")
     context.log.info(f"Precision-Recall AUC: {pr_auc:.4f}")
 
     context.add_output_metadata({
         "test_accuracy": f"{report['accuracy']:.4f}",
-        "class_1_precision": f"{report['TREATS (1)']['precision']:.4f}",
-        "class_1_recall": f"{report['TREATS (1)']['recall']:.4f}",
-        "class_1_f1": f"{report['TREATS (1)']['f1-score']:.4f}",
+        "indication_precision": f"{report['Indication (1)']['precision']:.4f}",
+        "indication_recall": f"{report['Indication (1)']['recall']:.4f}",
+        "indication_f1": f"{report['Indication (1)']['f1-score']:.4f}",
+        "contraindication_precision": f"{report['Contraindication (0)']['precision']:.4f}",
+        "contraindication_recall": f"{report['Contraindication (0)']['recall']:.4f}",
+        "contraindication_f1": f"{report['Contraindication (0)']['f1-score']:.4f}",
         "roc_auc": f"{roc_auc:.4f}",
         "pr_auc": f"{pr_auc:.4f}"
     })
@@ -466,57 +367,6 @@ def xgboost_model_evaluation(
         'y_pred_proba': y_pred_proba
     }
 
-
-# =====================================================================
-# ASSET 7: Generate All Drug-Disease Pairs
-# =====================================================================
-
-@asset(group_name="xgboost_drug_discovery", compute_kind="transform")
-def xgboost_all_drug_disease_pairs(
-    context: AssetExecutionContext,
-    xgboost_node_embeddings: Dict[str, Dict[str, Any]],
-    xgboost_known_drug_disease_pairs: pd.DataFrame,
-) -> pd.DataFrame:
-    """Generate all possible drug-disease pairs (excluding known treatments)."""
-    context.log.info("Generating all drug-disease pairs...")
-
-    embeddings = xgboost_node_embeddings
-    known_df = xgboost_known_drug_disease_pairs
-
-    # Get drugs and diseases
-    drugs = {k: v for k, v in embeddings.items() if v['type'] == 'drug'}
-    diseases = {k: v for k, v in embeddings.items() if v['type'] == 'disease'}
-
-    # Create set of known pairs
-    known_set = {(row['drug_id'], row['disease_id']) for _, row in known_df.iterrows()}
-
-    # Generate all pairs
-    all_pairs = []
-    for drug_id, drug_data in drugs.items():
-        for disease_id, disease_data in diseases.items():
-            if (drug_id, disease_id) not in known_set:
-                all_pairs.append({
-                    'drug_id': drug_id,
-                    'disease_id': disease_id,
-                    'drug_name': drug_data['name'],
-                    'disease_name': disease_data['name']
-                })
-
-    pairs_df = pd.DataFrame(all_pairs)
-
-    context.add_output_metadata({
-        "total_possible_pairs": len(drugs) * len(diseases),
-        "known_pairs_excluded": len(known_df),
-        "unknown_pairs_to_score": len(pairs_df),
-        "unique_drugs": len(drugs),
-        "unique_diseases": len(diseases)
-    })
-
-    context.log.info(f"Generated {len(pairs_df):,} unknown drug-disease pairs to score")
-
-    return pairs_df
-
-
 # =====================================================================
 # ASSET 8: Predict All Pairs
 # =====================================================================
@@ -524,47 +374,14 @@ def xgboost_all_drug_disease_pairs(
 @asset(group_name="xgboost_drug_discovery", compute_kind="ml")
 def xgboost_predictions(
     context: AssetExecutionContext,
-    xgboost_all_drug_disease_pairs: pd.DataFrame,
     xgboost_trained_model: Dict[str, Any],
-    xgboost_node_embeddings: Dict[str, Dict[str, Any]],
+    flattened_embeddings: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Predict treatment probabilities for all drug-disease pairs."""
-    context.log.info("Predicting treatment probabilities...")
+    """Predict treatment probabilities for all drug-disease pairs.
 
-    model = xgboost_trained_model['model']
-    embeddings = xgboost_node_embeddings
-    pairs_df = xgboost_all_drug_disease_pairs.copy()
-
-    # Create feature vectors
-    X_all = []
-    for _, row in pairs_df.iterrows():
-        drug_emb = embeddings[row['drug_id']]['embedding']
-        disease_emb = embeddings[row['disease_id']]['embedding']
-        feature_vector = np.concatenate([drug_emb, disease_emb])
-        X_all.append(feature_vector)
-
-    X_all = np.array(X_all)
-
-    context.log.info(f"Predicting for {len(X_all):,} pairs...")
-
-    # Predict
-    predictions = model.predict_proba(X_all)
-
-    # Add predictions to DataFrame
-    pairs_df['prob_not_treat'] = predictions[:, 0]
-    pairs_df['prob_treats'] = predictions[:, 1]  # KEY SCORE
-    pairs_df['prob_unknown'] = predictions[:, 2]
-
-    context.add_output_metadata({
-        "pairs_scored": len(pairs_df),
-        "avg_prob_treats": f"{pairs_df['prob_treats'].mean():.4f}",
-        "max_prob_treats": f"{pairs_df['prob_treats'].max():.4f}",
-        "min_prob_treats": f"{pairs_df['prob_treats'].min():.4f}"
-    })
-
-    context.log.info(f"Predictions complete for {len(pairs_df):,} pairs")
-
-    return pairs_df
+    NOTE: This asset is currently disabled because xgboost_all_drug_disease_pairs was removed.
+    """
+    raise NotImplementedError("xgboost_all_drug_disease_pairs asset has been removed")
 
 
 # =====================================================================

@@ -101,17 +101,12 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
     download_path.mkdir(parents=True, exist_ok=True)
 
     # PrimeKG files and their download URLs from Harvard Dataverse
-    # WARNING: The Harvard Dataverse file naming is confusing/swapped!
-    # Here's what each file actually contains:
-    #   - nodes.csv (ID 6180620) → kg.csv: edge triplets (relation, x_node, y_node)
-    #   - edges.csv (ID 6180619) → drug features (tab-separated)
-    #   - drug_features.csv (ID 6180618) → disease features (tab-separated)
-    #   - disease_features.csv (ID 6180617) → basic node info (not used - we extract from kg.csv)
+    # Files are saved with descriptive names that match their actual content
     files = {
-        "nodes.csv": "https://dataverse.harvard.edu/api/access/datafile/6180620",  # Actually: kg.csv
-        "edges.csv": "https://dataverse.harvard.edu/api/access/datafile/6180619",  # Actually: drug features
-        "drug_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180618",  # Actually: disease features
-        "disease_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180617",  # Actually: node list
+        "kg.csv": "https://dataverse.harvard.edu/api/access/datafile/6180620",  # Edge triplets (relation, x_node, y_node)
+        "drug_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180619",  # Drug features (tab-separated)
+        "disease_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180618",  # Disease features (tab-separated)
+        "nodes.csv": "https://dataverse.harvard.edu/api/access/datafile/6180617",  # Basic node info (not used - we extract from kg.csv)
     }
 
     downloaded = []

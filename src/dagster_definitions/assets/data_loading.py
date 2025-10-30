@@ -118,7 +118,7 @@ def primekg_nodes_loaded(
     from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges, bulk_load_nodes_to_memgraph
 
     download_dir = "data/01_raw/primekg"
-    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
+    edges_file = os.path.join(download_dir, "kg.csv")  # Contains edge triplets
 
     context.log.info(f"Loading edges to extract nodes from {edges_file}")
     edges_df = pd.read_csv(edges_file)
@@ -167,7 +167,7 @@ def primekg_edges_loaded(
     from neo4j import GraphDatabase
 
     download_dir = primekg_nodes_loaded["download_dir"]
-    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
+    edges_file = os.path.join(download_dir, "kg.csv")  # Contains edge triplets
 
     context.log.info(f"Loading edges from {edges_file}")
     edges_df = pd.read_csv(edges_file)
@@ -243,8 +243,7 @@ def drug_features_loaded(
     from neo4j import GraphDatabase
 
     download_dir = primekg_edges_loaded["download_dir"]
-    # Note: edges.csv actually contains drug features (see download function comments)
-    drug_features_file = os.path.join(download_dir, "edges.csv")
+    drug_features_file = os.path.join(download_dir, "drug_features.csv")
 
     context.log.info(f"Loading drug features from {drug_features_file}")
 
@@ -309,8 +308,7 @@ def disease_features_loaded(
     from neo4j import GraphDatabase
 
     download_dir = primekg_edges_loaded["download_dir"]
-    # Note: drug_features.csv actually contains disease features (see download function comments)
-    disease_features_file = os.path.join(download_dir, "drug_features.csv")
+    disease_features_file = os.path.join(download_dir, "disease_features.csv")
 
     context.log.info(f"Loading disease features from {disease_features_file}")
 
