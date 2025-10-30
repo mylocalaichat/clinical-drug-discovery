@@ -164,6 +164,7 @@ def primekg_edges_loaded(
 ) -> Dict[str, Any]:
     """Load PrimeKG edges/relationships into Memgraph using optimized bulk loading operations."""
     from clinical_drug_discovery.lib.data_loading import bulk_load_edges_to_memgraph
+    from neo4j import GraphDatabase
 
     download_dir = primekg_nodes_loaded["download_dir"]
     edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
@@ -171,6 +172,30 @@ def primekg_edges_loaded(
     context.log.info(f"Loading edges from {edges_file}")
     edges_df = pd.read_csv(edges_file)
     context.log.info(f"Loaded {len(edges_df):,} edges")
+
+    # Delete all existing edges before loading new ones
+    context.log.info("Deleting all existing edges from Memgraph...")
+    memgraph_uri = os.getenv("MEMGRAPH_URI")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    deleted_count = 0
+
+    try:
+        with driver.session() as session:
+            # Delete all relationships (edges) regardless of type
+            # Note: Using DELETE (not DETACH DELETE) to keep nodes intact
+            result = session.run("MATCH ()-[r]->() DELETE r RETURN count(r) as deleted_count")
+            record = result.single()
+            deleted_count = record["deleted_count"] if record else 0
+            context.log.info(f"✓ Deleted {deleted_count:,} existing edges (all types)")
+    finally:
+        driver.close()
 
     # Use optimized bulk loading with proper transaction management
     context.log.info("Starting optimized bulk edge loading...")
@@ -193,8 +218,16 @@ def primekg_edges_loaded(
     if loading_stats['failed_batches'] > 0:
         context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
 
+    context.add_output_metadata({
+        "deleted_edges": deleted_count,
+        "loaded_edges": loading_stats['loaded_edges'],
+        "success_rate": f"{loading_stats['success_rate']:.1f}%",
+        "loading_time_seconds": loading_stats['loading_time_seconds'],
+    })
+
     return {
         "edges_count": loading_stats['loaded_edges'],
+        "deleted_edges": deleted_count,
         "relation_types": edges_df["relation"].value_counts().to_dict(),
         "download_dir": download_dir,
         **loading_stats  # Include all loading statistics
