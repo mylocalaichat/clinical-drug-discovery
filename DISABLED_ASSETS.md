@@ -53,7 +53,7 @@ This document tracks which Dagster asset groups have been disabled and why.
 ## Active Asset Groups
 
 ### 1. Data Loading (6 assets)
-- `primekg_download_status`
+- `download_data`
 - `memgraph_database_ready`
 - `primekg_nodes_loaded`
 - `primekg_edges_loaded`

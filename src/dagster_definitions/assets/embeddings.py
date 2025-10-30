@@ -27,7 +27,7 @@ from clinical_drug_discovery.lib.gnn_embeddings import generate_gnn_embeddings
 @asset(group_name="embeddings", compute_kind="ml")
 def gnn_embeddings(
     context: AssetExecutionContext,
-    primekg_download_status: Dict,  # Ensure CSV files are downloaded
+    download_data: Dict,  # Ensure CSV files are downloaded
 ) -> Dict[str, Any]:
     """
     Train GNN embeddings on the knowledge graph using PyTorch.
@@ -45,7 +45,7 @@ def gnn_embeddings(
     - Result: ~124,381 nodes (96.1% of graph) | Excludes ~4,994 nodes (3.9%)
     """
     context.log.info("Training GNN embeddings from CSV files...")
-    context.log.info(f"CSV files downloaded: {primekg_download_status.get('downloaded_files', [])}")
+    context.log.info(f"CSV files downloaded: {download_data.get('downloaded_files', [])}")
     context.log.info("Node filtering: Excluding 'cellular_component' and 'exposure' (3.9% of nodes)")
 
     # Define file paths

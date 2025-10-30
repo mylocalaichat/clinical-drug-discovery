@@ -69,7 +69,7 @@ Available targets:
 The pipeline consists of 4 main stages:
 
 ### 1. Data Loading (`data_loading` group)
-- `primekg_download_status` - Download PrimeKG dataset
+- `download_data` - Download PrimeKG dataset
 - `neo4j_database_ready` - Setup Neo4j database
 - `primekg_nodes_loaded` - Load nodes to Neo4j
 - `primekg_edges_loaded` - Load edges to Neo4j

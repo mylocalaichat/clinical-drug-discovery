@@ -18,8 +18,12 @@ from clinical_drug_discovery.lib.data_loading import (
 load_dotenv()
 
 
-@asset(group_name="data_loading", compute_kind="download")
-def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
+@asset(
+    group_name="data_loading",
+    compute_kind="download",
+    op_tags={"dagster/max_runtime": 1800}  # 30 minutes timeout for large file downloads
+)
+def download_data(context: AssetExecutionContext) -> Dict[str, Any]:
     """Download PrimeKG dataset from Harvard Dataverse."""
     download_dir = "data/01_raw/primekg"
     context.log.info(f"Downloading PrimeKG data to {download_dir}")
@@ -33,7 +37,7 @@ def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
 
 
 @asset(group_name="data_loading", compute_kind="database")
-def memgraph_database_ready(context: AssetExecutionContext, primekg_download_status: Dict) -> Dict[str, str]:
+def memgraph_database_ready(context: AssetExecutionContext, download_data: Dict) -> Dict[str, str]:
     """Setup Memgraph database and clear all existing data."""
     from neo4j import GraphDatabase
     

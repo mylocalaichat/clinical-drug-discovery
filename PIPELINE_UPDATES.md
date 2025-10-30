@@ -64,7 +64,7 @@ with driver.session() as session:
 ┌──────────────────────────────────────────────────────────────────┐
 │ DATA LOADING (6 assets)                                          │
 │                                                                   │
-│ 1. primekg_download_status                                      │
+│ 1. download_data                                                 │
 │ 2. primekg_nodes_loaded                                          │
 │ 3. primekg_edges_loaded ← DELETES ALL EDGES FIRST               │
 │ 4. drug_features_loaded                                          │

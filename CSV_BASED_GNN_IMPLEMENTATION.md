@@ -117,7 +117,7 @@ def gnn_embeddings(
 @asset(group_name="embeddings", compute_kind="ml")
 def gnn_embeddings(
     context: AssetExecutionContext,
-    primekg_download_status: Dict,  # Only needs CSV files
+    download_data: Dict,  # Only needs CSV files
 ) -> Dict[str, Any]:
 ```
 
@@ -413,7 +413,7 @@ Saving embeddings to CSV: data/06_models/embeddings/gnn_embeddings.csv
 ```
 FileNotFoundError: data/01_raw/primekg/nodes.csv
 ```
-**Solution**: Run `primekg_download_status` asset first
+**Solution**: Run `download_data` asset first
 
 ### Issue: Memory error during CSV load
 ```

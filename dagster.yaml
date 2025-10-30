@@ -1,0 +1,27 @@
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+  config:
+    # Default timeout for all runs (in seconds)
+    # Individual assets can override with op_tags
+    run_config:
+      execution:
+        config:
+          # Increase timeout for long-running operations like downloads and database loading
+          timeout: 3600  # 1 hour default timeout
+
+telemetry:
+  enabled: false  # Disable telemetry for privacy
+
+run_monitoring:
+  enabled: true
+  # Check run health every 60 seconds
+  poll_interval_seconds: 60
+  # Cancel runs that haven't heartbeated in 10 minutes
+  max_runtime_seconds: 600
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: DefaultRunCoordinator
+  config:
+    max_concurrent_runs: 1  # Limit concurrent runs to avoid resource issues

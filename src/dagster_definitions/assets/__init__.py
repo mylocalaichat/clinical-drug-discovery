@@ -10,9 +10,9 @@ Dagster assets for Clinical-Enriched Drug Discovery.
 # )
 from .data_loading import (
     disease_features_loaded,
+    download_data,
     drug_features_loaded,
     memgraph_database_ready,
-    primekg_download_status,
     primekg_edges_loaded,
     primekg_nodes_loaded,
 )
@@ -53,7 +53,7 @@ from .xgboost_drug_discovery import (
 
 __all__ = [
     # Data Loading
-    "primekg_download_status",
+    "download_data",
     "memgraph_database_ready",
     "primekg_nodes_loaded",
     "primekg_edges_loaded",
