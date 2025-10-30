@@ -2,11 +2,12 @@
 Dagster assets for Clinical-Enriched Drug Discovery.
 """
 
-from .clinical_extraction import (
-    clinical_drug_disease_pairs,
-    clinical_extraction_stats,
-    mtsamples_raw,
-)
+# DISABLED: clinical_extraction asset group
+# from .clinical_extraction import (
+#     clinical_drug_disease_pairs,
+#     clinical_extraction_stats,
+#     mtsamples_raw,
+# )
 from .data_loading import (
     disease_features_loaded,
     drug_features_loaded,
@@ -15,11 +16,12 @@ from .data_loading import (
     primekg_edges_loaded,
     primekg_nodes_loaded,
 )
-from .drug_discovery import drug_discovery_results
-from .embedding_drug_discovery import (
-    drug_similarity_matrix,
-    embedding_enhanced_drug_discovery,
-)
+# DISABLED: drug_discovery assets (depend on clinical_extraction)
+# from .drug_discovery import drug_discovery_results
+# from .embedding_drug_discovery import (
+#     drug_similarity_matrix,
+#     embedding_enhanced_drug_discovery,
+# )
 from .embeddings import (
     embedding_visualizations,
     flattened_embeddings,
@@ -27,7 +29,8 @@ from .embeddings import (
     node2vec_embeddings,
     random_graph_sample,
 )
-from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
+# DISABLED: graph_enrichment asset group (depends on clinical_extraction)
+# from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
 from .xgboost_drug_discovery import (
     xgboost_all_drug_disease_pairs,
     xgboost_feature_vectors,
@@ -62,17 +65,17 @@ __all__ = [
     "primekg_edges_loaded",
     "drug_features_loaded",
     "disease_features_loaded",
-    # Clinical Extraction
-    "mtsamples_raw",
-    "clinical_drug_disease_pairs",
-    "clinical_extraction_stats",
-    # Graph Enrichment
-    "clinical_pairs_loaded",
-    "clinical_validation_stats",
-    # Drug Discovery
-    "drug_discovery_results",
-    "drug_similarity_matrix",
-    "embedding_enhanced_drug_discovery",
+    # Clinical Extraction (DISABLED)
+    # "mtsamples_raw",
+    # "clinical_drug_disease_pairs",
+    # "clinical_extraction_stats",
+    # Graph Enrichment (DISABLED - depends on clinical_extraction)
+    # "clinical_pairs_loaded",
+    # "clinical_validation_stats",
+    # Drug Discovery (DISABLED - depends on clinical_extraction)
+    # "drug_discovery_results",
+    # "drug_similarity_matrix",
+    # "embedding_enhanced_drug_discovery",
     # Graph Embeddings
     "random_graph_sample",
     "knowledge_graph",

@@ -115,12 +115,17 @@ def create_ascii_graph_visualization(graph: nx.Graph, nodes_df: pd.DataFrame, ma
 @asset(group_name="embeddings", compute_kind="database")
 def random_graph_sample(
     context: AssetExecutionContext,
-    primekg_edges_loaded: Dict,  # Ensure data is loaded first
+    primekg_edges_loaded: Dict,  # Ensure graph data is loaded first
+    drug_features_loaded: Dict,  # Ensure drug features are loaded
+    disease_features_loaded: Dict,  # Ensure disease features are loaded
 ) -> Dict[str, Any]:
     """Get random sample of nodes and edges for quick analysis - uses efficient queries."""
     from neo4j import GraphDatabase
-    
+
     context.log.info("Sampling random nodes and edges from Memgraph...")
+    context.log.info(f"Dependencies satisfied: edges={len(primekg_edges_loaded)} loaded, "
+                    f"drugs={drug_features_loaded.get('num_drugs', 0)}, "
+                    f"diseases={disease_features_loaded.get('num_diseases', 0)}")
     
     # Get Memgraph connection details
     memgraph_uri = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")

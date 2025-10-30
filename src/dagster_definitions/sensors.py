@@ -13,12 +13,13 @@ from dagster import (
 from pathlib import Path
 
 
-@sensor(
-    name="new_clinical_data_sensor",
-    target=AssetSelection.groups("clinical_extraction"),
-    minimum_interval_seconds=300,  # Check every 5 minutes
-)
-def new_clinical_data_sensor(context: SensorEvaluationContext):
+# DISABLED: clinical_extraction sensor
+# @sensor(
+#     name="new_clinical_data_sensor",
+#     target=AssetSelection.groups("clinical_extraction"),
+#     minimum_interval_seconds=300,  # Check every 5 minutes
+# )
+def new_clinical_data_sensor_disabled(context: SensorEvaluationContext):
     """
     Trigger clinical extraction when new clinical notes file is detected.
 

@@ -13,7 +13,7 @@ This module implements the complete drug-disease prediction pipeline:
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -229,21 +229,21 @@ def xgboost_training_data(
     unknown_df = pd.DataFrame(unknown_samples)
 
     # Combine all samples
-    training_data = pd.concat([positive_df, negative_df, unknown_df], ignore_index=True)
+    training_data = pd.concat([positive_samples, negative_df, unknown_df], ignore_index=True)
     training_data = training_data.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle
 
     context.add_output_metadata({
         "total_samples": len(training_data),
-        "positive_samples": len(positive_df),
+        "positive_samples": len(positive_samples),
         "negative_samples": len(negative_df),
         "unknown_samples": len(unknown_df),
-        "positive_ratio": f"{len(positive_df)/len(training_data):.2%}",
+        "positive_ratio": f"{len(positive_samples)/len(training_data):.2%}",
         "negative_ratio": f"{len(negative_df)/len(training_data):.2%}",
         "unknown_ratio": f"{len(unknown_df)/len(training_data):.2%}"
     })
 
     context.log.info(f"Created {len(training_data)} training samples")
-    context.log.info(f"  Positive: {len(positive_df)} ({len(positive_df)/len(training_data)*100:.1f}%)")
+    context.log.info(f"  Positive: {len(positive_samples)} ({len(positive_samples)/len(training_data)*100:.1f}%)")
     context.log.info(f"  Negative: {len(negative_df)} ({len(negative_df)/len(training_data)*100:.1f}%)")
     context.log.info(f"  Unknown: {len(unknown_df)} ({len(unknown_df)/len(training_data)*100:.1f}%)")
 

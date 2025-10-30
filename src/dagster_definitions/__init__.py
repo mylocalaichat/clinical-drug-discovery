@@ -11,15 +11,15 @@ from dagster import (
 
 from . import assets
 from .schedules import (
-    clinical_extraction_job,
+    # clinical_extraction_job,  # DISABLED
     complete_pipeline_job,
-    daily_clinical_extraction,
+    # daily_clinical_extraction,  # DISABLED
     monthly_pipeline_run,
     weekly_data_refresh,
     weekly_data_refresh_job,
 )
 from .sensors import (
-    new_clinical_data_sensor,
+    # new_clinical_data_sensor,  # DISABLED
     primekg_update_sensor,
 )
 
@@ -30,16 +30,16 @@ all_assets = load_assets_from_package_module(assets)
 defs = Definitions(
     assets=all_assets,
     schedules=[
-        daily_clinical_extraction,
+        # daily_clinical_extraction,  # DISABLED
         weekly_data_refresh,
         monthly_pipeline_run,
     ],
     sensors=[
-        new_clinical_data_sensor,
+        # new_clinical_data_sensor,  # DISABLED
         primekg_update_sensor,
     ],
     jobs=[
-        clinical_extraction_job,
+        # clinical_extraction_job,  # DISABLED
         weekly_data_refresh_job,
         complete_pipeline_job,
     ],

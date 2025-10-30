@@ -9,20 +9,20 @@ from dagster import (
 )
 
 
-# Job 1: Daily clinical extraction
-clinical_extraction_job = define_asset_job(
-    name="clinical_extraction_job",
-    selection=AssetSelection.groups("clinical_extraction"),
-    description="Extract drug-disease pairs from clinical notes using NER",
-)
+# Job 1: Daily clinical extraction (DISABLED)
+# clinical_extraction_job = define_asset_job(
+#     name="clinical_extraction_job",
+#     selection=AssetSelection.groups("clinical_extraction"),
+#     description="Extract drug-disease pairs from clinical notes using NER",
+# )
 
-# Schedule: Run clinical extraction daily at 8 AM
-daily_clinical_extraction = ScheduleDefinition(
-    name="daily_clinical_extraction",
-    job=clinical_extraction_job,
-    cron_schedule="0 8 * * *",  # Every day at 8:00 AM
-    description="Daily extraction of clinical drug-disease pairs",
-)
+# Schedule: Run clinical extraction daily at 8 AM (DISABLED)
+# daily_clinical_extraction = ScheduleDefinition(
+#     name="daily_clinical_extraction",
+#     job=clinical_extraction_job,
+#     cron_schedule="0 8 * * *",  # Every day at 8:00 AM
+#     description="Daily extraction of clinical drug-disease pairs",
+# )
 
 
 # Job 2: Weekly full data refresh

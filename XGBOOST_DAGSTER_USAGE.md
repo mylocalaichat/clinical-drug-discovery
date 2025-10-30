@@ -84,9 +84,17 @@ The XGBoost pipeline depends on the embeddings pipeline:
 
 **Dependency Chain:**
 ```
-primekg_edges_loaded → random_graph_sample → knowledge_graph
-  → node2vec_embeddings → flattened_embeddings
-    → xgboost_node_embeddings → xgboost_training_data → ...
+Data Loading (ALL must complete):
+  - primekg_edges_loaded
+  - drug_features_loaded
+  - disease_features_loaded
+    ↓
+Embeddings Pipeline:
+  random_graph_sample → knowledge_graph → node2vec_embeddings
+    → flattened_embeddings
+      ↓
+XGBoost Pipeline:
+  xgboost_node_embeddings → xgboost_training_data → ...
 ```
 
 The pipeline requires:
