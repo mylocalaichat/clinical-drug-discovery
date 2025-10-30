@@ -25,9 +25,7 @@ from .data_loading import (
 from .embeddings import (
     embedding_visualizations,
     flattened_embeddings,
-    knowledge_graph,
-    node2vec_embeddings,
-    random_graph_sample,
+    gnn_embeddings,
 )
 # DISABLED: graph_enrichment asset group (depends on clinical_extraction)
 # from .graph_enrichment import clinical_pairs_loaded, clinical_validation_stats
@@ -76,10 +74,8 @@ __all__ = [
     # "drug_discovery_results",
     # "drug_similarity_matrix",
     # "embedding_enhanced_drug_discovery",
-    # Graph Embeddings
-    "random_graph_sample",
-    "knowledge_graph",
-    "node2vec_embeddings",
+    # GNN Embeddings (replaces Node2Vec)
+    "gnn_embeddings",
     "flattened_embeddings",
     "embedding_visualizations",
     # XGBoost Drug Discovery
