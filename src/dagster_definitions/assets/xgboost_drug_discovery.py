@@ -47,6 +47,7 @@ from xgboost import XGBClassifier
 @asset(group_name="xgboost_drug_discovery", compute_kind="transform")
 def xgboost_train_test_split(
     context: AssetExecutionContext,
+    download_data: Dict,
     flattened_embeddings: pd.DataFrame,
 ) -> Dict[str, Any]:
     """Read edges CSV, join embeddings, build feature vectors, and split into train/test.
@@ -73,7 +74,9 @@ def xgboost_train_test_split(
 
     context.log.info("Creating training and test datasets from edges CSV + flattened embeddings...")
 
-    edges_file = "data/01_raw/primekg/edges.csv"
+    # Get edges file from download_data output - REQUIRED, no defaults
+    edges_file = download_data['edges_file']  # Will fail if not present
+    context.log.info(f"Using edges file: {edges_file}")
     try:
         edges_df = pd.read_csv(edges_file)
         context.log.info(f"Loaded {len(edges_df):,} total edges from {edges_file}")

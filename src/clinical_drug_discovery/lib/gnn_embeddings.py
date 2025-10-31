@@ -53,7 +53,7 @@ class GraphSAGEEmbedding(nn.Module):
 
 
 def load_graph_from_csv(
-    edges_csv: str = "data/01_raw/primekg/nodes.csv",
+    edges_csv: str,
     limit_nodes: int = None,
     include_node_types: list = None,
     use_cache: bool = True,
@@ -62,10 +62,8 @@ def load_graph_from_csv(
     """
     Load graph structure from CSV files for GNN training with optimizations.
 
-    Note: The PrimeKG 'nodes.csv' file actually contains the edge list (kg.csv).
-
     Args:
-        edges_csv: Path to edges CSV file (kg.csv, named nodes.csv in PrimeKG)
+        edges_csv: Path to edges CSV file (kg.csv contains edge triplets) - REQUIRED
         limit_nodes: Limit number of nodes (for testing)
         include_node_types: List of node types to include. If None, uses default filtering.
                            Default excludes 'cellular_component' and 'exposure'.
@@ -355,7 +353,7 @@ def train_gnn_embeddings(
 def save_embeddings_to_csv(
     embeddings: torch.Tensor,
     node_metadata: Dict[int, Dict[str, Any]],
-    output_csv: str = "data/06_models/embeddings/gnn_embeddings.csv"
+    output_csv: str
 ) -> Dict[str, int]:
     """
     Save GNN embeddings to CSV file.
@@ -363,7 +361,7 @@ def save_embeddings_to_csv(
     Args:
         embeddings: Node embeddings tensor
         node_metadata: Node metadata dictionary
-        output_csv: Path to output CSV file
+        output_csv: Path to output CSV file - REQUIRED
 
     Returns:
         Dictionary with statistics
@@ -414,8 +412,8 @@ def save_embeddings_to_csv(
 
 
 def generate_gnn_embeddings(
-    edges_csv: str = "data/01_raw/primekg/nodes.csv",
-    output_csv: str = "data/06_models/embeddings/gnn_embeddings.csv",
+    edges_csv: str,
+    output_csv: str,
     embedding_dim: int = 512,
     hidden_dim: int = 256,
     num_layers: int = 2,
@@ -430,8 +428,8 @@ def generate_gnn_embeddings(
     Complete pipeline: Load graph from CSV, train GNN, save embeddings to CSV.
 
     Args:
-        edges_csv: Path to edges CSV file (PrimeKG nodes.csv = kg.csv)
-        output_csv: Path to save embeddings CSV
+        edges_csv: Path to edges CSV file (kg.csv contains edge triplets) - REQUIRED
+        output_csv: Path to save embeddings CSV - REQUIRED
         embedding_dim: Output embedding dimension
         hidden_dim: Hidden layer dimension
         num_layers: Number of GNN layers
@@ -446,67 +444,71 @@ def generate_gnn_embeddings(
     Returns:
         Dictionary with statistics
     """
-    print("=" * 80)
-    print("GNN EMBEDDINGS GENERATION (CSV-BASED)")
-    print("=" * 80)
-
-    # Step 1: Load graph from CSV
-    print("\n1. Loading graph from CSV...")
-    data, node_metadata = load_graph_from_csv(
-        edges_csv=edges_csv,
-        limit_nodes=limit_nodes,
-        include_node_types=include_node_types
-    )
-    print(f"   Loaded {data.num_nodes} nodes, {data.num_edges} edges")
-
-    # Step 2: Train GNN
-    print("\n2. Training GNN model...")
-    
-    # Use MPS-compatible simple training for Apple Silicon
     try:
-        from .gnn_simple import train_gnn_embeddings_simple
-        use_simple = True
-        print("   Using MPS-compatible full-batch training")
-    except ImportError:
-        use_simple = False
-        print("   Using original neighbor sampling training")
-    
-    if use_simple:
-        embeddings = train_gnn_embeddings_simple(
-            data=data,
-            embedding_dim=embedding_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            num_epochs=num_epochs,
-            learning_rate=learning_rate,
-            device=device
-        )
-    else:
-        embeddings = train_gnn_embeddings(
-            data=data,
-            embedding_dim=embedding_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            num_epochs=num_epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            device=device,
-            use_neighbor_sampling=False  # Disable to avoid dependency issues
-        )
-    print(f"   Generated embeddings: {embeddings.shape}")
+        print("=" * 80)
+        print("GNN EMBEDDINGS GENERATION (CSV-BASED)")
+        print("=" * 80)
 
-    # Step 3: Save embeddings to CSV
-    print("\n3. Saving embeddings to CSV...")
-    save_stats = save_embeddings_to_csv(
-        embeddings=embeddings,
-        node_metadata=node_metadata,
-        output_csv=output_csv
-    )
-    print(f"   Saved {save_stats['saved_nodes']} embeddings")
+        # Step 1: Load graph from CSV
+        print("\n1. Loading graph from CSV...")
+        data, node_metadata = load_graph_from_csv(
+            edges_csv=edges_csv,
+            limit_nodes=limit_nodes,
+            include_node_types=include_node_types
+        )
+        print(f"   Loaded {data.num_nodes} nodes, {data.num_edges} edges")
 
-    print("\n" + "=" * 80)
-    print("COMPLETE!")
-    print("=" * 80)
+        # Step 2: Train GNN
+        print("\n2. Training GNN model...")
+        
+        # Use MPS-compatible simple training for Apple Silicon
+        try:
+            from .gnn_simple import train_gnn_embeddings_simple
+            use_simple = True
+            print("   Using MPS-compatible full-batch training")
+        except ImportError:
+            use_simple = False
+            print("   Using original neighbor sampling training")
+        
+        if use_simple:
+            embeddings = train_gnn_embeddings_simple(
+                data=data,
+                embedding_dim=embedding_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                num_epochs=num_epochs,
+                learning_rate=learning_rate,
+                device=device
+            )
+        else:
+            embeddings = train_gnn_embeddings(
+                data=data,
+                embedding_dim=embedding_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                num_epochs=num_epochs,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                device=device,
+                use_neighbor_sampling=False  # Disable to avoid dependency issues
+            )
+        print(f"   Generated embeddings: {embeddings.shape}")
+
+        # Step 3: Save embeddings to CSV
+        print("\n3. Saving embeddings to CSV...")
+        save_stats = save_embeddings_to_csv(
+            embeddings=embeddings,
+            node_metadata=node_metadata,
+            output_csv=output_csv
+        )
+        print(f"   Saved {save_stats['saved_nodes']} embeddings")
+
+        print("\n" + "=" * 80)
+        print("COMPLETE!")
+        print("=" * 80)
+    except Exception as e:
+        print(f"\n❌ ERROR during GNN embeddings generation: {e}")
+        raise e
 
     return {
         'num_nodes': data.num_nodes,

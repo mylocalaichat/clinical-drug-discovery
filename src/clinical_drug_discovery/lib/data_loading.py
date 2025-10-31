@@ -203,6 +203,10 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
         "downloaded_files": downloaded,
         "skipped_files": skipped,
         "total_files": len(files),
+        "edges_file": str(download_path / "kg.csv"),  # Main edges file
+        "nodes_file": str(download_path / "nodes.csv"),  # Basic node info
+        "drug_features_file": str(download_path / "drug_features.csv"),
+        "disease_features_file": str(download_path / "disease_features.csv"),
     }
 
 

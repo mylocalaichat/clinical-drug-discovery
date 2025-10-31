@@ -58,8 +58,9 @@ def gnn_embeddings(
     context.log.info(f"CSV files downloaded: {download_data.get('downloaded_files', [])}")
     context.log.info("Node filtering: Excluding 'cellular_component' and 'exposure' (3.9% of nodes)")
 
-    # Define file paths
-    edges_csv = "data/01_raw/primekg/nodes.csv"  # This is kg.csv (edge list)
+    # Get file paths from download_data output - REQUIRED, no defaults
+    edges_csv = download_data['edges_file']  # Will fail if not present
+    context.log.info(f"Using edges file: {edges_csv}")
 
     # GNN hyperparameters - memory optimized for laptop/MPS
     embedding_params = {
