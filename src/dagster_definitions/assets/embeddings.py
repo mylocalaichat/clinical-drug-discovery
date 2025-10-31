@@ -9,7 +9,6 @@ This module implements GNN embeddings using PyTorch:
 No Memgraph dependency - uses CSV files directly.
 """
 
-import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -44,13 +43,23 @@ def gnn_embeddings(
                 exposure (environmental toxins, not therapeutics)
     - Result: ~124,381 nodes (96.1% of graph) | Excludes ~4,994 nodes (3.9%)
     """
+    # Clean up existing embeddings file before training
+    output_csv = "data/06_models/embeddings/gnn_embeddings.csv"
+    output_path = Path(output_csv)
+
+    if output_path.exists():
+        file_size_mb = output_path.stat().st_size / (1024 * 1024)
+        output_path.unlink()
+        context.log.info(f"Deleted existing embeddings file: {output_csv} ({file_size_mb:.1f} MB)")
+    else:
+        context.log.info("No existing embeddings file to clean up")
+
     context.log.info("Training GNN embeddings from CSV files...")
     context.log.info(f"CSV files downloaded: {download_data.get('downloaded_files', [])}")
     context.log.info("Node filtering: Excluding 'cellular_component' and 'exposure' (3.9% of nodes)")
 
     # Define file paths
     edges_csv = "data/01_raw/primekg/nodes.csv"  # This is kg.csv (edge list)
-    output_csv = "data/06_models/embeddings/gnn_embeddings.csv"
 
     # GNN hyperparameters - memory optimized for laptop/MPS
     embedding_params = {
@@ -108,6 +117,16 @@ def flattened_embeddings(
     Reads embeddings from CSV file and converts them to a flattened DataFrame
     format suitable for XGBoost and other ML models.
     """
+    # Clean up existing flattened embeddings file before creating new one
+    output_path = Path("data/06_models/embeddings/gnn_flattened_embeddings.csv")
+
+    if output_path.exists():
+        file_size_mb = output_path.stat().st_size / (1024 * 1024)
+        output_path.unlink()
+        context.log.info(f"Deleted existing flattened embeddings: {output_path} ({file_size_mb:.1f} MB)")
+    else:
+        context.log.info("No existing flattened embeddings to clean up")
+
     context.log.info("Loading GNN embeddings from CSV...")
     context.log.info(f"GNN training generated {gnn_embeddings['num_nodes']} embeddings")
 
@@ -198,6 +217,24 @@ def embedding_visualizations(
 
     Generates 2D and 3D scatter plots showing node embeddings colored by type.
     """
+    # Clean up existing visualization files before creating new ones
+    viz_dir = Path("data/06_models/embeddings/visualizations")
+
+    if viz_dir.exists():
+        deleted_files = []
+        for html_file in viz_dir.glob("*.html"):
+            file_size_mb = html_file.stat().st_size / (1024 * 1024)
+            html_file.unlink()
+            deleted_files.append(f"{html_file.name} ({file_size_mb:.1f} MB)")
+            context.log.info(f"Deleted existing visualization: {html_file.name} ({file_size_mb:.1f} MB)")
+
+        if deleted_files:
+            context.log.info(f"Cleaned up {len(deleted_files)} visualization file(s)")
+        else:
+            context.log.info("No existing visualizations to clean up")
+    else:
+        context.log.info("Visualization directory does not exist yet, will be created")
+
     context.log.info("Creating GNN embedding visualizations...")
 
     try:

@@ -53,6 +53,24 @@ def xgboost_train_test_split(
 
     Outputs CSVs for train and test datasets and returns arrays and sample DataFrames.
     """
+    # Clean up existing train/test files before creating new ones
+    output_dir = Path("data/07_model_output")
+
+    if output_dir.exists():
+        deleted_files = []
+        for csv_file in output_dir.glob("xgboost_*.csv"):
+            file_size_mb = csv_file.stat().st_size / (1024 * 1024)
+            csv_file.unlink()
+            deleted_files.append(f"{csv_file.name} ({file_size_mb:.1f} MB)")
+            context.log.info(f"Deleted existing file: {csv_file.name} ({file_size_mb:.1f} MB)")
+
+        if deleted_files:
+            context.log.info(f"Cleaned up {len(deleted_files)} existing file(s)")
+        else:
+            context.log.info("No existing train/test files to clean up")
+    else:
+        context.log.info("Output directory does not exist yet, will be created")
+
     context.log.info("Creating training and test datasets from edges CSV + flattened embeddings...")
 
     edges_file = "data/01_raw/primekg/edges.csv"
@@ -201,6 +219,16 @@ def xgboost_trained_model(
     xgboost_train_test_split: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Train XGBoost classifier with cross-validation."""
+    # Clean up existing model file before training new one
+    model_path = Path("data/06_models/xgboost/drug_disease_model.pkl")
+
+    if model_path.exists():
+        file_size_mb = model_path.stat().st_size / (1024 * 1024)
+        model_path.unlink()
+        context.log.info(f"Deleted existing model: {model_path} ({file_size_mb:.1f} MB)")
+    else:
+        context.log.info("No existing model to clean up")
+
     context.log.info("Training XGBoost model...")
 
     X_train = xgboost_train_test_split['X_train']
@@ -394,6 +422,16 @@ def xgboost_ranked_results(
     xgboost_predictions: pd.DataFrame,
 ) -> pd.DataFrame:
     """Rank predictions by treatment probability and add confidence levels."""
+    # Clean up existing predictions file before creating new one
+    output_file = Path("data/07_reporting/xgboost/drug_discovery_predictions.csv")
+
+    if output_file.exists():
+        file_size_mb = output_file.stat().st_size / (1024 * 1024)
+        output_file.unlink()
+        context.log.info(f"Deleted existing predictions: {output_file} ({file_size_mb:.1f} MB)")
+    else:
+        context.log.info("No existing predictions to clean up")
+
     context.log.info("Ranking predictions...")
 
     # Sort by prob_treats (descending)
