@@ -2,7 +2,6 @@
 Data loading utilities for PrimeKG dataset with Memgraph.
 """
 
-import os
 import time
 import urllib.request
 from pathlib import Path

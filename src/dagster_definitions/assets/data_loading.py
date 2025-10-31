@@ -25,8 +25,29 @@ load_dotenv()
 )
 def download_data(context: AssetExecutionContext) -> Dict[str, Any]:
     """Download PrimeKG dataset from Harvard Dataverse."""
+    from pathlib import Path
+
     download_dir = "data/01_raw/primekg"
-    context.log.info(f"Downloading PrimeKG data to {download_dir}")
+    download_path = Path(download_dir)
+
+    # Delete all existing CSV files before downloading
+    if download_path.exists():
+        context.log.info(f"Cleaning up existing files in {download_dir}")
+        deleted_files = []
+        for csv_file in download_path.glob("*.csv"):
+            file_size_mb = csv_file.stat().st_size / (1024 * 1024)
+            csv_file.unlink()
+            deleted_files.append(f"{csv_file.name} ({file_size_mb:.1f} MB)")
+            context.log.info(f"  Deleted: {csv_file.name} ({file_size_mb:.1f} MB)")
+
+        if deleted_files:
+            context.log.info(f"Cleaned up {len(deleted_files)} existing file(s)")
+        else:
+            context.log.info("No existing files to clean up")
+    else:
+        context.log.info(f"Download directory does not exist yet, will be created")
+
+    context.log.info(f"Starting fresh download of PrimeKG data to {download_dir}")
 
     result = download_primekg_data(download_dir)
 
