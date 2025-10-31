@@ -6,6 +6,7 @@ from dagster import (
     AssetSelection,
     ScheduleDefinition,
     define_asset_job,
+    multiprocess_executor,
 )
 
 
@@ -30,6 +31,7 @@ weekly_data_refresh_job = define_asset_job(
     name="weekly_data_refresh",
     selection=AssetSelection.groups("data_loading"),
     description="Weekly refresh of PrimeKG data from Harvard Dataverse",
+    executor_def=multiprocess_executor.configured({"max_concurrent": 1}),
 )
 
 # Schedule: Run data loading weekly on Sundays at 2 AM
@@ -46,6 +48,7 @@ complete_pipeline_job = define_asset_job(
     name="complete_pipeline",
     selection=AssetSelection.all(),
     description="Run the complete clinical drug discovery pipeline from start to finish",
+    executor_def=multiprocess_executor.configured({"max_concurrent": 1}),
 )
 
 # Schedule: Run complete pipeline monthly on 1st at midnight

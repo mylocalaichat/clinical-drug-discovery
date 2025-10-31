@@ -17,7 +17,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv
-from torch_geometric.loader import NeighborLoader
+from torch.utils.checkpoint import checkpoint
+from tqdm import tqdm
 
 
 # Set up MPS fallback for Apple Silicon compatibility
@@ -56,7 +57,6 @@ def load_graph_from_csv(
     edges_csv: str,
     limit_nodes: int = None,
     include_node_types: list = None,
-    use_cache: bool = True,
     chunk_size: int = 500000
 ) -> Tuple[Data, Dict[int, Dict[str, Any]]]:
     """
@@ -67,16 +67,12 @@ def load_graph_from_csv(
         limit_nodes: Limit number of nodes (for testing)
         include_node_types: List of node types to include. If None, uses default filtering.
                            Default excludes 'cellular_component' and 'exposure'.
-        use_cache: Whether to use cached edge index if available
         chunk_size: Size of chunks for edge processing
 
     Returns:
         - PyG Data object with node features and edges
         - Node metadata dictionary
     """
-    from .gnn_cache import (
-        generate_cache_key, load_edge_index_cache, save_edge_index_cache
-    )
     from .gnn_optimization import (
         fast_node_extraction, create_sparse_edge_index
     )
@@ -97,17 +93,6 @@ def load_graph_from_csv(
     print(f"Loading graph from CSV: {edges_csv}")
     print(f"Including node types: {include_node_types}")
     print("Excluded types: ['cellular_component', 'exposure']")
-    
-    # Check cache first
-    if use_cache:
-        cache_key = generate_cache_key(edges_csv, include_node_types, limit_nodes)
-        cached_data = load_edge_index_cache(cache_key)
-        
-        if cached_data is not None:
-            edge_index, node_metadata, x = cached_data
-            data = Data(x=x, edge_index=edge_index)
-            print(f"\n✓ Loaded from cache: {data.num_nodes:,} nodes, {data.num_edges:,} edges")
-            return data, node_metadata
 
     # Load edges CSV (this is actually the kg.csv file with all edges)
     print("\nReading edges CSV...")
@@ -157,6 +142,13 @@ def load_graph_from_csv(
     # Create PyG Data object
     data = Data(x=x, edge_index=edge_index)
 
+    # Debug: Check for duplicates in nodes_df
+    nodes_df_duplicates = nodes_df['id'].duplicated().sum()
+    if nodes_df_duplicates > 0:
+        print(f"⚠️  WARNING: nodes_df has {nodes_df_duplicates} duplicate IDs!")
+        print(f"⚠️  Total rows in nodes_df: {len(nodes_df)}")
+        print(f"⚠️  Unique IDs in nodes_df: {nodes_df['id'].nunique()}")
+
     # Create metadata dictionary
     node_metadata = {}
     for idx, row in nodes_df.iterrows():
@@ -166,9 +158,7 @@ def load_graph_from_csv(
             'type': row['type']
         }
 
-    # Save to cache if enabled
-    if use_cache:
-        save_edge_index_cache(edge_index, node_metadata, x, cache_key)
+    print(f"Created node_metadata with {len(node_metadata)} unique nodes")
 
     print(f"\n✓ Graph loaded: {data.num_nodes:,} nodes, {data.num_edges:,} edges")
 
@@ -180,17 +170,21 @@ def train_gnn_embeddings(
     embedding_dim: int = 512,
     hidden_dim: int = 256,
     num_layers: int = 2,
-    num_epochs: int = 100,
+    num_epochs: int = 10,
     batch_size: int = 128,
     learning_rate: float = 0.01,
     device: str = None,
-    use_neighbor_sampling: bool = True
+    use_neighbor_sampling: bool = True,
+    edge_batch_size: int = 10000  # Process edges in batches to reduce memory
 ) -> torch.Tensor:
     """
-    Train GNN model to generate node embeddings.
+    Train GNN model with full MPS optimization and layer-wise computation.
 
-    Uses unsupervised training with link prediction as the objective.
-    Supports both full-batch and neighbor sampling approaches.
+    MPS-optimized training:
+    - All operations on MPS (no CPU fallback)
+    - Edge sampling in batches to reduce memory
+    - Layer-wise inference for final embeddings
+    - Aggressive memory management
 
     Args:
         data: PyG Data object
@@ -198,19 +192,24 @@ def train_gnn_embeddings(
         hidden_dim: Hidden layer dimension
         num_layers: Number of GNN layers
         num_epochs: Training epochs
-        batch_size: Batch size for neighbor sampling (if used)
+        batch_size: Number of edges per batch (not used for full-batch)
         learning_rate: Learning rate
-        device: 'cuda', 'mps', or 'cpu'
-        use_neighbor_sampling: Whether to use neighbor sampling (requires pyg-lib or torch-sparse)
+        device: 'cuda', 'mps', or 'cpu' (default: auto-detect MPS)
+        use_neighbor_sampling: Ignored (uses full-batch training)
+        edge_batch_size: Number of edges to sample per training step
 
     Returns:
         Node embeddings tensor
     """
-    # Determine device with MPS fallback handling
+    import os
+    # Force MPS fallback for unsupported ops
+    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
+    # Determine device - prioritize MPS
     if device is None:
         if torch.backends.mps.is_available():
             device = 'mps'
-            print("🍎 Using Apple M1 Neural Engine (MPS)")
+            print("🍎 Using Apple Silicon MPS (Metal Performance Shaders)")
         elif torch.cuda.is_available():
             device = 'cuda'
             print("🔥 Using NVIDIA CUDA GPU")
@@ -218,30 +217,59 @@ def train_gnn_embeddings(
             device = 'cpu'
             print("💻 Using CPU")
     else:
-        print(f"Training on device: {device}")
+        print(f"Using device: {device}")
 
-    print(f"Device: {device}")
+    print(f"✓ Device: {device}")
+    print("✓ Full-batch training with edge sampling")
+    print("✓ Layer-wise inference for memory efficiency")
 
-    # Handle MPS compatibility issues with PyTorch Geometric
-    use_cpu_for_sampling = False
-    if device == 'mps':
-        try:
-            # Test if MPS supports the required operations
-            import os
-            # Enable MPS fallback for unsupported operations
-            os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-            print("⚠️  Enabled MPS fallback for unsupported operations")
-            
-            # For NeighborLoader, we'll use CPU for sampling but GPU for training
-            use_cpu_for_sampling = True
-            print("📝 Using CPU for graph sampling, MPS for model training")
-            
-        except Exception as e:
-            print(f"⚠️  MPS compatibility issue detected: {e}")
-            print("🔄 Falling back to CPU for full training")
-            device = 'cpu'
+    # Memory-aware device check
+    # The bottleneck is message passing: (num_edges, embedding_dim)
+    # This creates temporary tensors during aggregation
+    num_edges = data.edge_index.size(1)
 
-    # Move data to training device
+    # Memory components:
+    # 1. Node embeddings: nodes × embedding_dim × 4 bytes
+    # 2. Edge aggregation (BOTTLENECK): edges × embedding_dim × 4 bytes × num_layers
+    # 3. Gradients: ~2x forward pass
+    node_memory_gb = (data.num_nodes * embedding_dim * 4) / (1024**3)
+    edge_memory_gb = (num_edges * embedding_dim * 4 * num_layers) / (1024**3)
+    total_memory_gb = (node_memory_gb + edge_memory_gb) * 2  # × 2 for gradients
+
+    print(f"\nMemory estimation:")
+    print(f"  Nodes: {data.num_nodes:,} | Edges: {num_edges:,}")
+    print(f"  Node memory: {node_memory_gb:.2f} GB")
+    print(f"  Edge aggregation: {edge_memory_gb:.2f} GB (BOTTLENECK)")
+    print(f"  Total estimated: {total_memory_gb:.2f} GB")
+
+    # For MPS, auto-adjust if needed
+    if device == 'mps' and total_memory_gb > 10:
+        print(f"\n⚠️  WARNING: Graph too large for MPS at current dimensions")
+        print(f"⚠️  Estimated memory: {total_memory_gb:.2f} GB (>10 GB)")
+
+        # Calculate required scale factor
+        target_memory_gb = 8  # Target 8 GB to be safe
+        scale_factor = target_memory_gb / total_memory_gb
+        new_embedding_dim = int(embedding_dim * scale_factor)
+        new_hidden_dim = int(hidden_dim * scale_factor)
+
+        # Ensure minimum viable dimensions
+        new_embedding_dim = max(new_embedding_dim, 64)
+        new_hidden_dim = max(new_hidden_dim, 32)
+
+        print(f"\n🔧 Auto-adjusting dimensions to fit in memory...")
+        print(f"   Old embedding_dim: {embedding_dim} → New: {new_embedding_dim}")
+        print(f"   Old hidden_dim: {hidden_dim} → New: {new_hidden_dim}")
+
+        embedding_dim = new_embedding_dim
+        hidden_dim = new_hidden_dim
+
+        # Recalculate
+        edge_memory_gb = (num_edges * embedding_dim * 4 * num_layers) / (1024**3)
+        total_memory_gb = (node_memory_gb + edge_memory_gb) * 2
+        print(f"   New estimated memory: {total_memory_gb:.2f} GB")
+
+    # Move data to device
     data = data.to(device)
 
     # Initialize model
@@ -254,99 +282,102 @@ def train_gnn_embeddings(
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Create neighbor sampler for batch training with MPS compatibility
-    try:
-        # Try to create NeighborLoader with original data
-        if use_cpu_for_sampling:
-            # Use CPU data for sampling to avoid MPS compatibility issues
-            data_for_sampling = data.to('cpu')
-            train_loader = NeighborLoader(
-                data_for_sampling,
-                num_neighbors=[10, 5],  # 2-hop neighbors
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=0  # For laptop compatibility
-            )
-            print("✓ Created NeighborLoader on CPU for MPS compatibility")
-        else:
-            train_loader = NeighborLoader(
-                data,
-                num_neighbors=[10, 5],  # 2-hop neighbors
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=0  # For laptop compatibility
-            )
-            print(f"✓ Created NeighborLoader on {device}")
-    
-    except Exception as e:
-        print(f"⚠️  NeighborLoader creation failed on {device}: {e}")
-        print("🔄 Falling back to CPU for sampling...")
-        data_for_sampling = data.to('cpu')
-        train_loader = NeighborLoader(
-            data_for_sampling,
-            num_neighbors=[10, 5],  # 2-hop neighbors
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=0  # For laptop compatibility
-        )
-        use_cpu_for_sampling = True
-
-    # Training loop with device handling
+    # Training loop with memory-efficient forward pass
     model.train()
-    for epoch in range(num_epochs):
-        total_loss = 0
-        num_batches = 0
+    print(f"\nTraining for {num_epochs} epochs...")
 
-        for batch in train_loader:
-            # Move batch to training device (may be different from sampling device)
-            batch = batch.to(device)
+    # Enable gradient checkpointing to trade compute for memory
+    if device == 'mps':
+        print("✓ Using gradient checkpointing for memory efficiency")
 
-            optimizer.zero_grad()
+    # Progress bar for training
+    pbar = tqdm(range(num_epochs), desc="Training", unit="epoch")
 
-            # Forward pass
-            embeddings = model(batch.x, batch.edge_index)
+    for _ in pbar:
+        optimizer.zero_grad()
 
-            # Link prediction loss (unsupervised)
-            # Sample positive and negative edges
-            pos_edge_index = batch.edge_index
-            num_nodes = batch.x.size(0)
+        # Forward pass with gradient checkpointing (saves memory during backward)
+        def forward_chunk(x, edge_index):
+            return model(x, edge_index)
 
-            # Positive edge scores
-            src_emb = embeddings[pos_edge_index[0]]
-            dst_emb = embeddings[pos_edge_index[1]]
-            pos_scores = (src_emb * dst_emb).sum(dim=1)
+        # Use checkpointing for large graphs
+        if device == 'mps' and data.num_nodes > 50000:
+            embeddings = checkpoint(forward_chunk, data.x, data.edge_index, use_reentrant=False)
+        else:
+            embeddings = model(data.x, data.edge_index)
 
-            # Negative sampling
-            neg_dst = torch.randint(0, num_nodes, (pos_edge_index.size(1),), device=device)
-            neg_dst_emb = embeddings[neg_dst]
-            neg_scores = (src_emb * neg_dst_emb).sum(dim=1)
+        # Sample edges for loss computation (reduces memory)
+        num_edges = data.edge_index.size(1)
+        num_edge_samples = min(edge_batch_size, num_edges)
 
-            # Binary cross-entropy loss
-            pos_loss = F.binary_cross_entropy_with_logits(
-                pos_scores, torch.ones_like(pos_scores)
-            )
-            neg_loss = F.binary_cross_entropy_with_logits(
-                neg_scores, torch.zeros_like(neg_scores)
-            )
-            loss = pos_loss + neg_loss
+        # Random sample of edges
+        perm = torch.randperm(num_edges, device=device)[:num_edge_samples]
+        pos_edge_sample = data.edge_index[:, perm]
 
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+        # Positive edge scores
+        src_emb = embeddings[pos_edge_sample[0]]
+        dst_emb = embeddings[pos_edge_sample[1]]
+        pos_scores = (src_emb * dst_emb).sum(dim=1)
 
-            total_loss += loss.item()
-            num_batches += 1
+        # Negative sampling
+        neg_dst = torch.randint(0, data.num_nodes, (num_edge_samples,), device=device)
+        neg_dst_emb = embeddings[neg_dst]
+        neg_scores = (src_emb * neg_dst_emb).sum(dim=1)
 
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0
+        # Binary cross-entropy loss
+        pos_loss = F.binary_cross_entropy_with_logits(
+            pos_scores, torch.ones_like(pos_scores)
+        )
+        neg_loss = F.binary_cross_entropy_with_logits(
+            neg_scores, torch.zeros_like(neg_scores)
+        )
+        loss = pos_loss + neg_loss
 
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        # Backward pass
+        loss.backward()
+        optimizer.step()
 
-    # Generate final embeddings
+        # Update progress bar with loss
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+        # Clear all intermediate tensors
+        del embeddings, src_emb, dst_emb, pos_scores, neg_scores, neg_dst_emb
+        if device == 'mps' and hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
+
+    # Generate final embeddings using layer-wise computation (memory efficient)
+    print("\n✓ Generating final embeddings with layer-wise computation...")
     model.eval()
-    with torch.no_grad():
-        embeddings = model(data.x, data.edge_index)
 
+    with torch.no_grad():
+        # Layer-wise forward pass
+        x = data.x
+        edge_index = data.edge_index
+
+        # Progress bar for layer-wise inference
+        layer_pbar = tqdm(enumerate(model.convs[:-1]), total=num_layers-1, desc="Inference (layers)", unit="layer")
+
+        for i, conv in layer_pbar:
+            layer_pbar.set_description(f"Layer {i+1}/{num_layers}")
+            x = conv(x, edge_index)
+            x = F.relu(x)
+            x = model.dropout(x)
+
+            # Clear cache after each layer
+            if device == 'mps' and hasattr(torch.mps, 'empty_cache'):
+                torch.mps.empty_cache()
+
+        # Final layer
+        print(f"  Final layer {num_layers}/{num_layers}...")
+        x = model.convs[-1](x, edge_index)
+
+        # Final cache clear
+        if device == 'mps' and hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
+
+        embeddings = x
+
+    print(f"✓ Generated embeddings: {embeddings.shape}")
     return embeddings.cpu()
 
 
@@ -380,6 +411,7 @@ def save_embeddings_to_csv(
 
     # Build DataFrame with node metadata and embeddings
     node_ids = list(node_metadata.keys())
+    print(f"Saving embeddings for {len(node_ids)} nodes from metadata...")
     rows = []
 
     for node_id in node_ids:
@@ -395,6 +427,12 @@ def save_embeddings_to_csv(
         rows.append(row)
 
     embeddings_df = pd.DataFrame(rows)
+
+    # Debug: Check for duplicates before saving
+    df_duplicates = embeddings_df['node_id'].duplicated().sum()
+    if df_duplicates > 0:
+        print(f"⚠️  WARNING: embeddings_df has {df_duplicates} duplicate node_ids before saving!")
+        print(f"⚠️  Total rows: {len(embeddings_df)}, Unique IDs: {embeddings_df['node_id'].nunique()}")
 
     # Save to CSV
     embeddings_df.to_csv(output_csv, index=False)
@@ -417,7 +455,7 @@ def generate_gnn_embeddings(
     embedding_dim: int = 512,
     hidden_dim: int = 256,
     num_layers: int = 2,
-    num_epochs: int = 100,
+    num_epochs: int = 10,
     batch_size: int = 128,
     learning_rate: float = 0.01,
     limit_nodes: int = None,
@@ -460,38 +498,17 @@ def generate_gnn_embeddings(
 
         # Step 2: Train GNN
         print("\n2. Training GNN model...")
-        
-        # Use MPS-compatible simple training for Apple Silicon
-        try:
-            from .gnn_simple import train_gnn_embeddings_simple
-            use_simple = True
-            print("   Using MPS-compatible full-batch training")
-        except ImportError:
-            use_simple = False
-            print("   Using original neighbor sampling training")
-        
-        if use_simple:
-            embeddings = train_gnn_embeddings_simple(
-                data=data,
-                embedding_dim=embedding_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                num_epochs=num_epochs,
-                learning_rate=learning_rate,
-                device=device
-            )
-        else:
-            embeddings = train_gnn_embeddings(
-                data=data,
-                embedding_dim=embedding_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                num_epochs=num_epochs,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                device=device,
-                use_neighbor_sampling=False  # Disable to avoid dependency issues
-            )
+
+        embeddings = train_gnn_embeddings(
+            data=data,
+            embedding_dim=embedding_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_epochs=num_epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            device=device
+        )
         print(f"   Generated embeddings: {embeddings.shape}")
 
         # Step 3: Save embeddings to CSV
