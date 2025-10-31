@@ -50,9 +50,14 @@ def xgboost_train_test_split(
     download_data: Dict,
     flattened_embeddings: pd.DataFrame,
 ) -> Dict[str, Any]:
-    """Read edges CSV, join embeddings, build feature vectors, and split into train/test.
+    """Read edges CSV, join embeddings, build feature vectors, and split into train/val/test.
 
-    Outputs CSVs for train and test datasets and returns arrays and sample DataFrames.
+    Binary classification task:
+    - Class 0: Contraindication (drug should NOT be used for disease)
+    - Class 1: Indication (drug SHOULD be used for disease)
+
+    Outputs CSVs for train, validation, and test datasets (60/20/20 split).
+    Returns arrays and sample DataFrames for all three sets.
     """
     # Clean up existing train/test files before creating new ones
     output_dir = Path("data/07_model_output")
@@ -87,33 +92,58 @@ def xgboost_train_test_split(
         context.log.error(f"Error reading edges CSV: {e}")
         return {}
 
-    # Filter for indication and contraindication relationships between drugs and diseases
-    relation_df = edges_df[
-        ((edges_df['relation'] == 'indication') | (edges_df['relation'] == 'contraindication')) &
+    # Filter for indication relationships (positive class)
+    indication_df = edges_df[
+        (edges_df['relation'] == 'indication') &
         (edges_df['x_type'] == 'drug') &
         (edges_df['y_type'] == 'disease')
     ].copy()
 
-    context.log.info(f"Filtered to {len(relation_df):,} drug-disease edges (indication/contraindication)")
+    context.log.info(f"Found {len(indication_df):,} indication pairs (positive class)")
 
-    # Build known pairs list
-    known_pairs = []
-    for _, row in relation_df.iterrows():
-        label = 1 if row['relation'] == 'indication' else 0
-        known_pairs.append({
+    # Filter for contraindication relationships (negative class)
+    contraindication_df = edges_df[
+        (edges_df['relation'] == 'contraindication') &
+        (edges_df['x_type'] == 'drug') &
+        (edges_df['y_type'] == 'disease')
+    ].copy()
+
+    context.log.info(f"Found {len(contraindication_df):,} contraindication pairs (negative class)")
+
+    # Build indicated pairs list (label=1)
+    indicated_pairs = []
+    for _, row in indication_df.iterrows():
+        indicated_pairs.append({
             'drug_id': str(row['x_id']),
             'drug_name': str(row.get('x_name', '')),
             'disease_id': str(row['y_id']),
             'disease_name': str(row.get('y_name', '')),
-            'label': label,
-            'relationship_type': row['relation']
+            'label': 1,
+            'relationship_type': 'indication'
         })
 
-    if not known_pairs:
-        context.log.warning("No known drug-disease pairs found in edges CSV")
+    # Build contraindicated pairs list (label=0)
+    contraindicated_pairs = []
+    for _, row in contraindication_df.iterrows():
+        contraindicated_pairs.append({
+            'drug_id': str(row['x_id']),
+            'drug_name': str(row.get('x_name', '')),
+            'disease_id': str(row['y_id']),
+            'disease_name': str(row.get('y_name', '')),
+            'label': 0,
+            'relationship_type': 'contraindication'
+        })
+
+    # Combine both classes
+    all_pairs = indicated_pairs + contraindicated_pairs
+
+    if not all_pairs:
+        context.log.warning("No drug-disease pairs found in edges CSV")
         return {}
 
-    known_df = pd.DataFrame(known_pairs)
+    context.log.info(f"Total pairs: {len(all_pairs):,} (indicated: {len(indicated_pairs):,}, contraindicated: {len(contraindicated_pairs):,})")
+
+    labeled_pairs_df = pd.DataFrame(all_pairs)
 
     # Build embeddings lookup
     embedding_cols = [c for c in flattened_embeddings.columns if c.startswith('emb_')]
@@ -131,7 +161,7 @@ def xgboost_train_test_split(
     y_list = []
     samples = []
 
-    for _, row in known_df.iterrows():
+    for _, row in labeled_pairs_df.iterrows():
         d_id = str(row['drug_id'])
         dis_id = str(row['disease_id'])
         if d_id in embeddings_dict and dis_id in embeddings_dict:
@@ -157,18 +187,29 @@ def xgboost_train_test_split(
     y = np.array(y_list)
     samples_df = pd.DataFrame(samples)
 
-    # Train/test split
-    X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
-        X, y, samples_df.index.values, test_size=0.2, random_state=42, stratify=y
+    # Train/Val/Test split (60/20/20)
+    # First split: 60% train, 40% temp (val+test)
+    X_train, X_temp, y_train, y_temp, idx_train, idx_temp = train_test_split(
+        X, y, samples_df.index.values, test_size=0.4, random_state=42, stratify=y
+    )
+
+    # Second split: Split temp into 50/50 (which gives us 20% val, 20% test of total)
+    X_val, X_test, y_val, y_test, idx_val, idx_test = train_test_split(
+        X_temp, y_temp, idx_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
 
     samples_train = samples_df.loc[idx_train].reset_index(drop=True)
+    samples_val = samples_df.loc[idx_val].reset_index(drop=True)
     samples_test = samples_df.loc[idx_test].reset_index(drop=True)
 
     # Attach features as lists for CSV output
     samples_train = samples_train.copy()
     samples_train['features'] = [list(x) for x in X_train]
     samples_train['label'] = y_train
+
+    samples_val = samples_val.copy()
+    samples_val['features'] = [list(x) for x in X_val]
+    samples_val['label'] = y_val
 
     samples_test = samples_test.copy()
     samples_test['features'] = [list(x) for x in X_test]
@@ -178,19 +219,29 @@ def xgboost_train_test_split(
     output_dir = Path("data/07_model_output")
     output_dir.mkdir(parents=True, exist_ok=True)
     train_file = output_dir / "xgboost_train_set.csv"
+    val_file = output_dir / "xgboost_val_set.csv"
     test_file = output_dir / "xgboost_test_set.csv"
+
     samples_train.to_csv(train_file, index=False)
+    samples_val.to_csv(val_file, index=False)
     samples_test.to_csv(test_file, index=False)
 
     # Add metadata including file URIs
     context.add_output_metadata({
         'train_file_uri': str(train_file.resolve()),
+        'val_file_uri': str(val_file.resolve()),
         'test_file_uri': str(test_file.resolve()),
         'train_samples': len(X_train),
+        'val_samples': len(X_val),
         'test_samples': len(X_test),
+        'split_ratio': '60% train / 20% val / 20% test',
         'train_label_distribution': {
             'indications_1': int(sum(y_train == 1)),
             'contraindications_0': int(sum(y_train == 0))
+        },
+        'val_label_distribution': {
+            'indications_1': int(sum(y_val == 1)),
+            'contraindications_0': int(sum(y_val == 0))
         },
         'test_label_distribution': {
             'indications_1': int(sum(y_test == 1)),
@@ -198,16 +249,21 @@ def xgboost_train_test_split(
         }
     })
 
-    context.log.info(f"Saved train/test CSVs: {train_file}, {test_file}")
+    context.log.info(f"Saved train/val/test CSVs: {train_file}, {val_file}, {test_file}")
+    context.log.info(f"Split: train={len(X_train)} ({len(X_train)/len(X)*100:.1f}%), val={len(X_val)} ({len(X_val)/len(X)*100:.1f}%), test={len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
 
     return {
         'X_train': X_train,
+        'X_val': X_val,
         'X_test': X_test,
         'y_train': y_train,
+        'y_val': y_val,
         'y_test': y_test,
         'train_file': str(train_file.resolve()),
+        'val_file': str(val_file.resolve()),
         'test_file': str(test_file.resolve()),
         'samples_train': samples_train,
+        'samples_val': samples_val,
         'samples_test': samples_test,
     }
 
@@ -236,8 +292,14 @@ def xgboost_trained_model(
 
     X_train = xgboost_train_test_split['X_train']
     y_train = xgboost_train_test_split['y_train']
+    X_val = xgboost_train_test_split['X_val']
+    y_val = xgboost_train_test_split['y_val']
     X_test = xgboost_train_test_split['X_test']
     y_test = xgboost_train_test_split['y_test']
+
+    context.log.info(f"Training set: {len(X_train)} samples")
+    context.log.info(f"Validation set: {len(X_val)} samples")
+    context.log.info(f"Test set: {len(X_test)} samples")
 
     # Initialize model for binary classification (0=contraindication, 1=indication)
     model = XGBClassifier(
@@ -252,8 +314,8 @@ def xgboost_trained_model(
         eval_metric='logloss'
     )
 
-    # Cross-validation
-    context.log.info("Running 5-fold cross-validation...")
+    # Cross-validation on training set
+    context.log.info("Running 5-fold cross-validation on training set...")
     cv_scores = cross_val_score(
         model, X_train, y_train,
         cv=KFold(n_splits=5, shuffle=True, random_state=42),
@@ -266,9 +328,18 @@ def xgboost_trained_model(
 
     context.log.info(f"Cross-validation accuracy: {cv_mean:.4f} (+/- {cv_std:.4f})")
 
-    # Train on full training set
-    context.log.info("Training on full training set...")
-    model.fit(X_train, y_train)
+    # Train on full training set with early stopping on validation set
+    context.log.info("Training on full training set with validation monitoring...")
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+
+    # Evaluate on validation set
+    val_predictions = model.predict(X_val)
+    val_accuracy = float((val_predictions == y_val).mean())
+    context.log.info(f"Validation accuracy: {val_accuracy:.4f}")
 
     # Save model to disk
     model_dir = Path("data/06_models/xgboost")
@@ -286,7 +357,9 @@ def xgboost_trained_model(
         "learning_rate": 0.1,
         "cv_accuracy_mean": f"{cv_mean:.4f}",
         "cv_accuracy_std": f"{cv_std:.4f}",
+        "val_accuracy": f"{val_accuracy:.4f}",
         "training_samples": X_train.shape[0],
+        "validation_samples": X_val.shape[0],
         "test_samples": X_test.shape[0],
         "model_saved_to": str(model_path)
     })
@@ -294,10 +367,13 @@ def xgboost_trained_model(
     return {
         'model': model,
         'X_train': X_train,
+        'X_val': X_val,
         'X_test': X_test,
         'y_train': y_train,
+        'y_val': y_val,
         'y_test': y_test,
         'cv_scores': cv_scores,
+        'val_accuracy': val_accuracy,
         'model_path': str(model_path)
     }
 
@@ -324,7 +400,12 @@ def xgboost_model_evaluation(
     context.log.info(f"y_test type: {type(y_test)}")
 
     # Predictions
+    # Binary classification: predicts class (0 or 1)
     y_pred = model.predict(X_test)
+
+    # Probability predictions for both classes
+    # y_pred_proba[:, 0] = probability of contraindication (class 0)
+    # y_pred_proba[:, 1] = probability of indication (class 1)
     y_pred_proba = model.predict_proba(X_test)
 
     # Debug logging for predictions
@@ -377,6 +458,18 @@ def xgboost_model_evaluation(
 
     context.log.info(f"\nROC-AUC: {roc_auc:.4f}")
     context.log.info(f"Precision-Recall AUC: {pr_auc:.4f}")
+
+    # Log example predictions with both class probabilities
+    context.log.info("\nExample predictions (showing both class probabilities):")
+    for i in range(min(5, len(y_test))):
+        true_label = "Indication" if y_test[i] == 1 else "Contraindication"
+        pred_label = "Indication" if y_pred[i] == 1 else "Contraindication"
+        prob_contraindication = y_pred_proba[i, 0]
+        prob_indication = y_pred_proba[i, 1]
+        context.log.info(
+            f"  Sample {i+1}: True={true_label}, Pred={pred_label} | "
+            f"P(Contraindication)={prob_contraindication:.3f}, P(Indication)={prob_indication:.3f}"
+        )
 
     context.add_output_metadata({
         "test_accuracy": f"{report['accuracy']:.4f}",
