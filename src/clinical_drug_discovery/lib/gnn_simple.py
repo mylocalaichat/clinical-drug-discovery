@@ -19,7 +19,7 @@ class GraphSAGEEmbedding(nn.Module):
         self.convs = nn.ModuleList()
         # Import here to avoid issues if torch_geometric.nn is not available
         from torch_geometric.nn import SAGEConv
-        
+
         self.convs.append(SAGEConv(in_channels, hidden_channels))
 
         for _layer_idx in range(num_layers - 2):
@@ -39,6 +39,43 @@ class GraphSAGEEmbedding(nn.Module):
         return x
 
 
+class GraphAutoEncoder(nn.Module):
+    """Graph Autoencoder for unsupervised node embedding learning."""
+
+    def __init__(self, in_channels: int, hidden_channels: int, embedding_dim: int, num_layers: int = 2):
+        super().__init__()
+
+        # Encoder (GraphSAGE)
+        self.encoder = GraphSAGEEmbedding(
+            in_channels=in_channels,
+            hidden_channels=hidden_channels,
+            out_channels=embedding_dim,
+            num_layers=num_layers
+        )
+
+        # Decoder (simple MLP to reconstruct node features)
+        self.decoder = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden_channels, in_channels)
+        )
+
+    def encode(self, x, edge_index):
+        """Encode node features into embeddings."""
+        return self.encoder(x, edge_index)
+
+    def decode(self, embeddings):
+        """Decode embeddings back to node features."""
+        return self.decoder(embeddings)
+
+    def forward(self, x, edge_index):
+        """Full forward pass: encode then decode."""
+        embeddings = self.encode(x, edge_index)
+        reconstructed = self.decode(embeddings)
+        return embeddings, reconstructed
+
+
 def train_gnn_embeddings_simple(
     data: Data,
     embedding_dim: int = 512,
@@ -51,8 +88,8 @@ def train_gnn_embeddings_simple(
     max_nodes_mps: int = 5000  # Conservative limit for MPS full-batch training
 ) -> torch.Tensor:
     """
-    Train GNN model using full-batch training (no neighbor sampling).
-    This avoids dependency issues and MPS compatibility problems.
+    Train GNN model using autoencoder with full-batch training.
+    Uses reconstruction loss instead of edge sampling.
 
     Args:
         data: PyG Data object
@@ -96,17 +133,17 @@ def train_gnn_embeddings_simple(
         print(f"Training on device: {device}")
 
     print(f"Device: {device}")
-    print("📋 Using full-batch training (node-level)")
+    print("📋 Using full-batch training with autoencoder")
     print(f"📐 Dimensions: embedding={embedding_dim}, hidden={hidden_dim}")
 
     # Move data to device
     data = data.to(device)
 
-    # Initialize model with memory-efficient settings
-    model = GraphSAGEEmbedding(
+    # Initialize autoencoder model
+    model = GraphAutoEncoder(
         in_channels=data.x.size(1),
         hidden_channels=hidden_dim,
-        out_channels=embedding_dim,
+        embedding_dim=embedding_dim,
         num_layers=min(num_layers, 2)  # Limit layers for memory
     ).to(device)
 
@@ -122,51 +159,29 @@ def train_gnn_embeddings_simple(
     
     for epoch in range(num_epochs):
         optimizer.zero_grad()
-        
+
         try:
-            # Forward pass - full batch for all nodes
-            embeddings = model(data.x, data.edge_index)
+            # Forward pass - autoencoder reconstruction
+            embeddings, reconstructed = model(data.x, data.edge_index)
 
-            # Edge sampling for loss calculation
-            if data.edge_index.size(1) > 0:
-                # Sample edges for training (larger batches = better gradient estimates)
-                max_samples = min(1000 if device == 'mps' else 2000, data.edge_index.size(1))
-                edge_indices = torch.randperm(data.edge_index.size(1), device=device)[:max_samples]
-                sampled_edges = data.edge_index[:, edge_indices]
-                
-                # Positive samples
-                src_embeddings = embeddings[sampled_edges[0]]
-                dst_embeddings = embeddings[sampled_edges[1]]
-                pos_scores = torch.sum(src_embeddings * dst_embeddings, dim=1)
-                
-                # Negative samples
-                neg_dst = torch.randint(0, data.num_nodes, (max_samples,), device=device)
-                neg_embeddings = embeddings[neg_dst]
-                neg_scores = torch.sum(src_embeddings * neg_embeddings, dim=1)
-                
-                # Binary classification loss
-                pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
-                neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
-                loss = pos_loss + neg_loss
-                
-                loss.backward()
-                
-                # Gradient clipping for stability
-                if memory_efficient:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
+            # Reconstruction loss (MSE between original and reconstructed features)
+            loss = F.mse_loss(reconstructed, data.x)
 
-                # Aggressive memory cleanup for MPS (prevents fragmentation)
-                if device == 'mps':
-                    if hasattr(torch.mps, 'empty_cache'):
-                        torch.mps.empty_cache()
+            loss.backward()
 
-                if epoch % 10 == 0:
-                    print(f"Epoch {epoch:3d}, Loss: {loss.item():.4f}, Batch: {max_samples} edges")
-            else:
-                print("⚠️  No edges found in graph")
-                break
+            # Gradient clipping for stability
+            if memory_efficient:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            optimizer.step()
+
+            # Aggressive memory cleanup for MPS (prevents fragmentation)
+            if device == 'mps':
+                if hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
+
+            if epoch % 10 == 0:
+                print(f"Epoch {epoch:3d}, Reconstruction Loss: {loss.item():.4f}")
                 
         except RuntimeError as e:
             if "out of memory" in str(e):
@@ -180,10 +195,10 @@ def train_gnn_embeddings_simple(
             else:
                 raise e
     
-    # Generate final embeddings
+    # Generate final embeddings using encoder only
     model.eval()
     with torch.no_grad():
-        final_embeddings = model(data.x, data.edge_index)
+        final_embeddings = model.encode(data.x, data.edge_index)
 
     # Final cleanup
     if device == 'mps' and hasattr(torch.mps, 'empty_cache'):
