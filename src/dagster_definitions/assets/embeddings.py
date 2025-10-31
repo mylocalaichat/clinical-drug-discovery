@@ -69,7 +69,7 @@ def gnn_embeddings(
         "embedding_dim": 512,  # Reduced from 512 for memory efficiency
         "hidden_dim": 256,     # Reduced from 256 for memory efficiency
         "num_layers": 2,
-        "num_epochs": 50,      # Reduced for faster training on laptop
+        "num_epochs": 100,      # Reduced for faster training on laptop
         "batch_size": 128,
         "learning_rate": 0.01,
         "device": None,        # Auto-detect (cuda/mps/cpu)

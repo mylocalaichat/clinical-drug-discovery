@@ -48,7 +48,7 @@ def train_gnn_embeddings_simple(
     learning_rate: float = 0.01,
     device: str = None,
     memory_efficient: bool = False,
-    max_nodes_mps: int = 150000  # Increased for M1/M2/M3 with 16GB+ RAM
+    max_nodes_mps: int = 5000  # Conservative limit for MPS full-batch training
 ) -> torch.Tensor:
     """
     Train GNN model using full-batch training (no neighbor sampling).
@@ -64,8 +64,8 @@ def train_gnn_embeddings_simple(
         device: 'cuda', 'mps', or 'cpu'
         memory_efficient: Enable memory optimizations
         max_nodes_mps: Max nodes for MPS device (fallback to CPU if exceeded).
-                       Default 150k is safe for M1/M2/M3 with 16GB+ RAM.
-                       PrimeKG's 124k nodes fits comfortably.
+                       Default 50k is conservative for full-batch training.
+                       Larger graphs (>50k nodes) automatically use CPU.
 
     Returns:
         Node embeddings tensor
@@ -96,13 +96,8 @@ def train_gnn_embeddings_simple(
         print(f"Training on device: {device}")
 
     print(f"Device: {device}")
-    print("📋 Using memory-efficient full-batch training")
-
-    # Memory optimization: Use smaller dimensions for large graphs
-    if memory_efficient and data.num_nodes > 10000:
-        embedding_dim = min(embedding_dim, 256)
-        hidden_dim = min(hidden_dim, 128)
-        print(f"📉 Reduced dimensions for memory: embed={embedding_dim}, hidden={hidden_dim}")
+    print("📋 Using full-batch training (node-level)")
+    print(f"📐 Dimensions: embedding={embedding_dim}, hidden={hidden_dim}")
 
     # Move data to device
     data = data.to(device)
@@ -129,16 +124,12 @@ def train_gnn_embeddings_simple(
         optimizer.zero_grad()
         
         try:
-            # Forward pass with memory management
-            if memory_efficient and device == 'mps':
-                # Use smaller batch processing for MPS (no AMP for MPS)
-                embeddings = model(data.x, data.edge_index)
-            else:
-                embeddings = model(data.x, data.edge_index)
-            
-            # Memory-efficient loss calculation
+            # Forward pass - full batch for all nodes
+            embeddings = model(data.x, data.edge_index)
+
+            # Edge sampling for loss calculation
             if data.edge_index.size(1) > 0:
-                # Reduce sample size for memory efficiency
+                # Sample edges for training (larger batches = better gradient estimates)
                 max_samples = min(1000 if device == 'mps' else 2000, data.edge_index.size(1))
                 edge_indices = torch.randperm(data.edge_index.size(1), device=device)[:max_samples]
                 sampled_edges = data.edge_index[:, edge_indices]
@@ -165,14 +156,14 @@ def train_gnn_embeddings_simple(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
-                
-                # Memory cleanup
-                if memory_efficient and device == 'mps':
+
+                # Aggressive memory cleanup for MPS (prevents fragmentation)
+                if device == 'mps':
                     if hasattr(torch.mps, 'empty_cache'):
                         torch.mps.empty_cache()
-                
+
                 if epoch % 10 == 0:
-                    print(f"Epoch {epoch:3d}, Loss: {loss.item():.4f}")
+                    print(f"Epoch {epoch:3d}, Loss: {loss.item():.4f}, Batch: {max_samples} edges")
             else:
                 print("⚠️  No edges found in graph")
                 break
@@ -189,14 +180,14 @@ def train_gnn_embeddings_simple(
             else:
                 raise e
     
-    # Generate final embeddings with memory management
+    # Generate final embeddings
     model.eval()
     with torch.no_grad():
-        if memory_efficient and device == 'mps':
-            # Process in smaller chunks for final embeddings
-            final_embeddings = model(data.x, data.edge_index)
-        else:
-            final_embeddings = model(data.x, data.edge_index)
-        
+        final_embeddings = model(data.x, data.edge_index)
+
+    # Final cleanup
+    if device == 'mps' and hasattr(torch.mps, 'empty_cache'):
+        torch.mps.empty_cache()
+
     print(f"✓ Training completed. Generated embeddings shape: {final_embeddings.shape}")
     return final_embeddings
