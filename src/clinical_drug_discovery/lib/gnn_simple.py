@@ -47,7 +47,7 @@ def train_gnn_embeddings_simple(
     num_epochs: int = 100,
     learning_rate: float = 0.01,
     device: str = None,
-    memory_efficient: bool = True,
+    memory_efficient: bool = False,
     max_nodes_mps: int = 150000  # Increased for M1/M2/M3 with 16GB+ RAM
 ) -> torch.Tensor:
     """
