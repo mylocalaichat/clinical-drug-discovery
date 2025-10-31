@@ -150,6 +150,32 @@ def xgboost_train_test_split(
     if not embedding_cols:
         raise ValueError("No embedding columns found in flattened_embeddings DataFrame")
 
+    context.log.info(f"Building embeddings lookup from {len(flattened_embeddings)} flattened embeddings...")
+
+    # Debug: Check node types in flattened_embeddings
+    if 'node_type' in flattened_embeddings.columns:
+        flattened_node_counts = flattened_embeddings['node_type'].value_counts().to_dict()
+        context.log.info(f"Node types in flattened_embeddings: {flattened_node_counts}")
+
+    # Check for duplicate node IDs
+    duplicate_mask = flattened_embeddings['node_id'].astype(str).duplicated(keep=False)
+    num_duplicates = duplicate_mask.sum()
+
+    if num_duplicates > 0:
+        context.log.warning(f"⚠️  Found {num_duplicates} duplicate node IDs in flattened_embeddings!")
+        duplicate_ids = flattened_embeddings[duplicate_mask]['node_id'].unique()
+        context.log.warning(f"⚠️  Number of unique IDs with duplicates: {len(duplicate_ids)}")
+        context.log.warning(f"⚠️  Example duplicate IDs: {list(duplicate_ids[:5])}")
+
+        # Show duplicate breakdown by node type
+        dup_by_type = flattened_embeddings[duplicate_mask]['node_type'].value_counts().to_dict()
+        context.log.warning(f"⚠️  Duplicates by node type: {dup_by_type}")
+
+        # Remove duplicates - keep first occurrence
+        context.log.info("Removing duplicates, keeping first occurrence...")
+        flattened_embeddings = flattened_embeddings.drop_duplicates(subset='node_id', keep='first')
+        context.log.info(f"After deduplication: {len(flattened_embeddings)} unique nodes")
+
     embeddings_dict = {}
     for _, row in flattened_embeddings.iterrows():
         embeddings_dict[str(row['node_id'])] = row[embedding_cols].values.astype(np.float32)

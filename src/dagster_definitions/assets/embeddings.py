@@ -140,6 +140,11 @@ def flattened_embeddings(
 
     context.log.info(f"Loaded {len(embeddings_df)} embeddings from CSV")
 
+    # Debug: Check node type counts from CSV
+    if 'node_type' in embeddings_df.columns:
+        csv_node_counts = embeddings_df['node_type'].value_counts().to_dict()
+        context.log.info(f"Node types from CSV: {csv_node_counts}")
+
     # Parse embedding column (stored as string representation of list)
     import ast
 
@@ -153,6 +158,19 @@ def flattened_embeddings(
     embeddings_df = embeddings_df[['node_id', 'node_name', 'node_type', 'embedding']]
 
     context.log.info(f"Parsed {len(embeddings_df)} embeddings")
+
+    # Debug: Check for duplicate node IDs
+    duplicate_count = embeddings_df['node_id'].duplicated().sum()
+    if duplicate_count > 0:
+        context.log.warning(f"⚠️  Found {duplicate_count} duplicate node IDs in embeddings CSV!")
+        duplicate_ids = embeddings_df[embeddings_df['node_id'].duplicated(keep=False)]['node_id'].unique()
+        context.log.warning(f"⚠️  Number of unique IDs with duplicates: {len(duplicate_ids)}")
+        context.log.warning(f"⚠️  Example duplicate IDs: {list(duplicate_ids[:5])}")
+
+        # Remove duplicates before proceeding
+        context.log.info("Removing duplicates, keeping first occurrence...")
+        embeddings_df = embeddings_df.drop_duplicates(subset='node_id', keep='first')
+        context.log.info(f"After deduplication: {len(embeddings_df)} unique nodes")
 
     # Flatten embeddings into separate columns
     context.log.info("Flattening embeddings into columns...")
