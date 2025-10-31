@@ -48,12 +48,12 @@ def train_gnn_embeddings_simple(
     learning_rate: float = 0.01,
     device: str = None,
     memory_efficient: bool = True,
-    max_nodes_mps: int = 5000
+    max_nodes_mps: int = 150000  # Increased for M1/M2/M3 with 16GB+ RAM
 ) -> torch.Tensor:
     """
     Train GNN model using full-batch training (no neighbor sampling).
     This avoids dependency issues and MPS compatibility problems.
-    
+
     Args:
         data: PyG Data object
         embedding_dim: Output embedding dimension
@@ -63,8 +63,10 @@ def train_gnn_embeddings_simple(
         learning_rate: Learning rate
         device: 'cuda', 'mps', or 'cpu'
         memory_efficient: Enable memory optimizations
-        max_nodes_mps: Max nodes for MPS device (fallback to CPU if exceeded)
-    
+        max_nodes_mps: Max nodes for MPS device (fallback to CPU if exceeded).
+                       Default 150k is safe for M1/M2/M3 with 16GB+ RAM.
+                       PrimeKG's 124k nodes fits comfortably.
+
     Returns:
         Node embeddings tensor
     """
@@ -129,9 +131,8 @@ def train_gnn_embeddings_simple(
         try:
             # Forward pass with memory management
             if memory_efficient and device == 'mps':
-                # Use smaller batch processing for MPS
-                with torch.cuda.amp.autocast(enabled=False):  # Disable AMP for MPS
-                    embeddings = model(data.x, data.edge_index)
+                # Use smaller batch processing for MPS (no AMP for MPS)
+                embeddings = model(data.x, data.edge_index)
             else:
                 embeddings = model(data.x, data.edge_index)
             
