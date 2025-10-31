@@ -26,6 +26,9 @@ dependencies = [
     "matplotlib>=3.10.7",
     "seaborn>=0.13.2",
     "plotly>=6.3.1",
+    # PyTorch and GNN dependencies
+    "torch>=2.0.0",
+    "torch-geometric>=2.3.0",
 ]
 
 [tool.setuptools.packages.find]
