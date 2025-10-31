@@ -181,7 +181,7 @@ clinical-drug-discovery/
 The pipeline is organized into 4 asset groups:
 
 ### 1. **data_loading** (6 assets)
-- `primekg_download_status` - Download PrimeKG from Harvard Dataverse
+- `download_data` - Download PrimeKG from Harvard Dataverse
 - `neo4j_database_ready` - Setup Neo4j database
 - `primekg_nodes_loaded` - Load nodes into Neo4j
 - `primekg_edges_loaded` - Load edges into Neo4j
@@ -226,7 +226,7 @@ LIMIT 10;
 Dagster automatically determines execution order based on asset dependencies:
 
 ```
-primekg_download_status
+download_data
     ↓
 neo4j_database_ready
     ↓

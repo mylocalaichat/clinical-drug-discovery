@@ -6,23 +6,24 @@ from dagster import (
     AssetSelection,
     ScheduleDefinition,
     define_asset_job,
+    multiprocess_executor,
 )
 
 
-# Job 1: Daily clinical extraction
-clinical_extraction_job = define_asset_job(
-    name="clinical_extraction_job",
-    selection=AssetSelection.groups("clinical_extraction"),
-    description="Extract drug-disease pairs from clinical notes using NER",
-)
+# Job 1: Daily clinical extraction (DISABLED)
+# clinical_extraction_job = define_asset_job(
+#     name="clinical_extraction_job",
+#     selection=AssetSelection.groups("clinical_extraction"),
+#     description="Extract drug-disease pairs from clinical notes using NER",
+# )
 
-# Schedule: Run clinical extraction daily at 8 AM
-daily_clinical_extraction = ScheduleDefinition(
-    name="daily_clinical_extraction",
-    job=clinical_extraction_job,
-    cron_schedule="0 8 * * *",  # Every day at 8:00 AM
-    description="Daily extraction of clinical drug-disease pairs",
-)
+# Schedule: Run clinical extraction daily at 8 AM (DISABLED)
+# daily_clinical_extraction = ScheduleDefinition(
+#     name="daily_clinical_extraction",
+#     job=clinical_extraction_job,
+#     cron_schedule="0 8 * * *",  # Every day at 8:00 AM
+#     description="Daily extraction of clinical drug-disease pairs",
+# )
 
 
 # Job 2: Weekly full data refresh
@@ -30,6 +31,7 @@ weekly_data_refresh_job = define_asset_job(
     name="weekly_data_refresh",
     selection=AssetSelection.groups("data_loading"),
     description="Weekly refresh of PrimeKG data from Harvard Dataverse",
+    executor_def=multiprocess_executor.configured({"max_concurrent": 1}),
 )
 
 # Schedule: Run data loading weekly on Sundays at 2 AM
@@ -46,6 +48,7 @@ complete_pipeline_job = define_asset_job(
     name="complete_pipeline",
     selection=AssetSelection.all(),
     description="Run the complete clinical drug discovery pipeline from start to finish",
+    executor_def=multiprocess_executor.configured({"max_concurrent": 1}),
 )
 
 # Schedule: Run complete pipeline monthly on 1st at midnight

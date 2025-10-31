@@ -18,11 +18,36 @@ from clinical_drug_discovery.lib.data_loading import (
 load_dotenv()
 
 
-@asset(group_name="data_loading", compute_kind="download")
-def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
+@asset(
+    group_name="data_loading",
+    compute_kind="download",
+    op_tags={"dagster/max_runtime": 1800}  # 30 minutes timeout for large file downloads
+)
+def download_data(context: AssetExecutionContext) -> Dict[str, Any]:
     """Download PrimeKG dataset from Harvard Dataverse."""
+    from pathlib import Path
+
     download_dir = "data/01_raw/primekg"
-    context.log.info(f"Downloading PrimeKG data to {download_dir}")
+    download_path = Path(download_dir)
+
+    # Delete all existing CSV files before downloading
+    if download_path.exists():
+        context.log.info(f"Cleaning up existing files in {download_dir}")
+        deleted_files = []
+        for csv_file in download_path.glob("*.csv"):
+            file_size_mb = csv_file.stat().st_size / (1024 * 1024)
+            csv_file.unlink()
+            deleted_files.append(f"{csv_file.name} ({file_size_mb:.1f} MB)")
+            context.log.info(f"  Deleted: {csv_file.name} ({file_size_mb:.1f} MB)")
+
+        if deleted_files:
+            context.log.info(f"Cleaned up {len(deleted_files)} existing file(s)")
+        else:
+            context.log.info("No existing files to clean up")
+    else:
+        context.log.info("Download directory does not exist yet, will be created")
+
+    context.log.info(f"Starting fresh download of PrimeKG data to {download_dir}")
 
     result = download_primekg_data(download_dir)
 
@@ -33,7 +58,7 @@ def primekg_download_status(context: AssetExecutionContext) -> Dict[str, Any]:
 
 
 @asset(group_name="data_loading", compute_kind="database")
-def memgraph_database_ready(context: AssetExecutionContext, primekg_download_status: Dict) -> Dict[str, str]:
+def memgraph_database_ready(context: AssetExecutionContext, download_data: Dict) -> Dict[str, str]:
     """Setup Memgraph database and clear all existing data."""
     from neo4j import GraphDatabase
     
@@ -116,9 +141,34 @@ def primekg_nodes_loaded(
 ) -> Dict[str, Any]:
     """Load PrimeKG nodes into Memgraph using optimized bulk loading operations."""
     from clinical_drug_discovery.lib.data_loading import extract_nodes_from_edges, bulk_load_nodes_to_memgraph
+    from neo4j import GraphDatabase
+
+    # Clean up existing nodes at the start
+    context.log.info("Cleaning up existing nodes from previous runs...")
+    memgraph_uri = os.getenv("MEMGRAPH_URI")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+
+    try:
+        with driver.session() as session:
+            node_count = session.run("MATCH (n) RETURN count(n) as count").single()["count"]
+            if node_count > 0:
+                context.log.info(f"Deleting {node_count:,} existing nodes...")
+                session.run("MATCH (n) DETACH DELETE n", timeout=600)
+                context.log.info("✓ All nodes deleted")
+            else:
+                context.log.info("No existing nodes to clean up")
+    finally:
+        driver.close()
 
     download_dir = "data/01_raw/primekg"
-    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
+    edges_file = os.path.join(download_dir, "kg.csv")  # Contains edge triplets
 
     context.log.info(f"Loading edges to extract nodes from {edges_file}")
     edges_df = pd.read_csv(edges_file)
@@ -164,13 +214,38 @@ def primekg_edges_loaded(
 ) -> Dict[str, Any]:
     """Load PrimeKG edges/relationships into Memgraph using optimized bulk loading operations."""
     from clinical_drug_discovery.lib.data_loading import bulk_load_edges_to_memgraph
+    from neo4j import GraphDatabase
 
     download_dir = primekg_nodes_loaded["download_dir"]
-    edges_file = os.path.join(download_dir, "nodes.csv")  # Actually contains edges
+    edges_file = os.path.join(download_dir, "kg.csv")  # Contains edge triplets
 
     context.log.info(f"Loading edges from {edges_file}")
     edges_df = pd.read_csv(edges_file)
     context.log.info(f"Loaded {len(edges_df):,} edges")
+
+    # Delete all existing edges before loading new ones
+    context.log.info("Deleting all existing edges from Memgraph...")
+    memgraph_uri = os.getenv("MEMGRAPH_URI")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+    deleted_count = 0
+
+    try:
+        with driver.session() as session:
+            # Delete all relationships (edges) regardless of type
+            # Note: Using DELETE (not DETACH DELETE) to keep nodes intact
+            result = session.run("MATCH ()-[r]->() DELETE r RETURN count(r) as deleted_count")
+            record = result.single()
+            deleted_count = record["deleted_count"] if record else 0
+            context.log.info(f"✓ Deleted {deleted_count:,} existing edges (all types)")
+    finally:
+        driver.close()
 
     # Use optimized bulk loading with proper transaction management
     context.log.info("Starting optimized bulk edge loading...")
@@ -193,8 +268,16 @@ def primekg_edges_loaded(
     if loading_stats['failed_batches'] > 0:
         context.log.warning(f"{loading_stats['failed_batches']} batches failed during loading")
 
+    context.add_output_metadata({
+        "deleted_edges": deleted_count,
+        "loaded_edges": loading_stats['loaded_edges'],
+        "success_rate": f"{loading_stats['success_rate']:.1f}%",
+        "loading_time_seconds": loading_stats['loading_time_seconds'],
+    })
+
     return {
         "edges_count": loading_stats['loaded_edges'],
+        "deleted_edges": deleted_count,
         "relation_types": edges_df["relation"].value_counts().to_dict(),
         "download_dir": download_dir,
         **loading_stats  # Include all loading statistics
@@ -209,9 +292,46 @@ def drug_features_loaded(
     """Load drug features into Memgraph."""
     from neo4j import GraphDatabase
 
+    # Clean up existing drug features at the start
+    context.log.info("Cleaning up existing drug features from previous runs...")
+    memgraph_uri = os.getenv("MEMGRAPH_URI")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+
+    try:
+        with driver.session() as session:
+            # Count nodes with drug features
+            result = session.run("""
+                MATCH (n:Node)
+                WHERE n.has_drug_features = true
+                RETURN count(n) as count
+            """)
+            count = result.single()["count"]
+
+            if count > 0:
+                context.log.info(f"Removing drug features from {count:,} nodes...")
+                # Remove all drug_* properties and has_drug_features flag
+                session.run("""
+                    MATCH (n:Node)
+                    WHERE n.has_drug_features = true
+                    WITH n, [k IN keys(n) WHERE k STARTS WITH 'drug_' OR k = 'has_drug_features'] AS props_to_remove
+                    UNWIND props_to_remove AS prop
+                    REMOVE n[prop]
+                """, timeout=300)
+                context.log.info("✓ Drug features removed")
+            else:
+                context.log.info("No existing drug features to clean up")
+    finally:
+        driver.close()
+
     download_dir = primekg_edges_loaded["download_dir"]
-    # Note: edges.csv actually contains drug features (see download function comments)
-    drug_features_file = os.path.join(download_dir, "edges.csv")
+    drug_features_file = os.path.join(download_dir, "drug_features.csv")
 
     context.log.info(f"Loading drug features from {drug_features_file}")
 
@@ -275,9 +395,46 @@ def disease_features_loaded(
     """Load disease features into Memgraph."""
     from neo4j import GraphDatabase
 
+    # Clean up existing disease features at the start
+    context.log.info("Cleaning up existing disease features from previous runs...")
+    memgraph_uri = os.getenv("MEMGRAPH_URI")
+    memgraph_user = os.getenv("MEMGRAPH_USER", "")
+    memgraph_password = os.getenv("MEMGRAPH_PASSWORD", "")
+
+    auth = None
+    if memgraph_user or memgraph_password:
+        auth = (memgraph_user, memgraph_password)
+
+    driver = GraphDatabase.driver(memgraph_uri, auth=auth)
+
+    try:
+        with driver.session() as session:
+            # Count nodes with disease features
+            result = session.run("""
+                MATCH (n:Node)
+                WHERE n.has_disease_features = true
+                RETURN count(n) as count
+            """)
+            count = result.single()["count"]
+
+            if count > 0:
+                context.log.info(f"Removing disease features from {count:,} nodes...")
+                # Remove all disease_* properties and has_disease_features flag
+                session.run("""
+                    MATCH (n:Node)
+                    WHERE n.has_disease_features = true
+                    WITH n, [k IN keys(n) WHERE k STARTS WITH 'disease_' OR k = 'has_disease_features'] AS props_to_remove
+                    UNWIND props_to_remove AS prop
+                    REMOVE n[prop]
+                """, timeout=300)
+                context.log.info("✓ Disease features removed")
+            else:
+                context.log.info("No existing disease features to clean up")
+    finally:
+        driver.close()
+
     download_dir = primekg_edges_loaded["download_dir"]
-    # Note: drug_features.csv actually contains disease features (see download function comments)
-    disease_features_file = os.path.join(download_dir, "drug_features.csv")
+    disease_features_file = os.path.join(download_dir, "disease_features.csv")
 
     context.log.info(f"Loading disease features from {disease_features_file}")
 

@@ -2,7 +2,6 @@
 Data loading utilities for PrimeKG dataset with Memgraph.
 """
 
-import os
 import time
 import urllib.request
 from pathlib import Path
@@ -101,17 +100,12 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
     download_path.mkdir(parents=True, exist_ok=True)
 
     # PrimeKG files and their download URLs from Harvard Dataverse
-    # WARNING: The Harvard Dataverse file naming is confusing/swapped!
-    # Here's what each file actually contains:
-    #   - nodes.csv (ID 6180620) → kg.csv: edge triplets (relation, x_node, y_node)
-    #   - edges.csv (ID 6180619) → drug features (tab-separated)
-    #   - drug_features.csv (ID 6180618) → disease features (tab-separated)
-    #   - disease_features.csv (ID 6180617) → basic node info (not used - we extract from kg.csv)
+    # Files are saved with descriptive names that match their actual content
     files = {
-        "nodes.csv": "https://dataverse.harvard.edu/api/access/datafile/6180620",  # Actually: kg.csv
-        "edges.csv": "https://dataverse.harvard.edu/api/access/datafile/6180619",  # Actually: drug features
-        "drug_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180618",  # Actually: disease features
-        "disease_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180617",  # Actually: node list
+        "kg.csv": "https://dataverse.harvard.edu/api/access/datafile/6180620",  # Edge triplets (relation, x_node, y_node)
+        "drug_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180619",  # Drug features (tab-separated)
+        "disease_features.csv": "https://dataverse.harvard.edu/api/access/datafile/6180618",  # Disease features (tab-separated)
+        "nodes.csv": "https://dataverse.harvard.edu/api/access/datafile/6180617",  # Basic node info (not used - we extract from kg.csv)
     }
 
     downloaded = []
@@ -128,63 +122,91 @@ def download_primekg_data(download_dir: str) -> Dict[str, str]:
             skipped.append(filename)
         else:
             print(f"Downloading {filename}...")
-            try:
-                # Download with progress bar and proper headers
-                def report_progress(block_num, block_size, total_size):
-                    downloaded_mb = (block_num * block_size) / (1024 * 1024)
-                    total_mb = total_size / (1024 * 1024)
-                    if total_size > 0:
-                        percent = min(100, (block_num * block_size * 100) / total_size)
-                        print(f"  {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='\r')
 
-                # Create request with proper headers
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        'User-Agent': 'PrimeKG-Clinical-Discovery/1.0',
-                        'Accept': 'text/csv,application/octet-stream,*/*',
-                    }
-                )
-                
-                # Open URL with headers and save to file
-                with urllib.request.urlopen(req) as response:
-                    with open(filepath, 'wb') as f:
-                        total_size = int(response.headers.get('Content-Length', 0))
-                        block_size = 8192
-                        bytes_downloaded = 0
-                        
-                        while True:
-                            block = response.read(block_size)
-                            if not block:
-                                break
-                            f.write(block)
-                            bytes_downloaded += len(block)
-                            report_progress(bytes_downloaded // block_size, block_size, total_size)
-                
-                file_size = filepath.stat().st_size / (1024 * 1024)
-                print(f"  ✓ Downloaded {filename} ({file_size:.1f} MB)")
-                downloaded.append(filename)
+            # Retry logic for downloads
+            max_retries = 3
+            retry_delay = 5  # seconds
 
-            except urllib.error.HTTPError as e:
-                if e.code == 403:
-                    print(f"  ⚠️  Access denied for {filename}. You may need to:")
-                    print("     1. Visit https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/IXA7BM")
-                    print("     2. Register an account and request access")
-                    print(f"     3. Download {filename} manually to {download_path}")
-                    print(f"  Skipping {filename} for now...")
-                    skipped.append(filename)
-                else:
-                    print(f"  ✗ HTTP Error {e.code}: {e.reason}")
-                    raise
-            except Exception as e:
-                print(f"  ✗ Failed to download {filename}: {e}")
-                raise
+            for attempt in range(max_retries):
+                try:
+                    # Create request with proper headers
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            'User-Agent': 'PrimeKG-Clinical-Discovery/1.0',
+                            'Accept': 'text/csv,application/octet-stream,*/*',
+                        }
+                    )
+
+                    # Open URL with headers and save to file
+                    with urllib.request.urlopen(req, timeout=60) as response:
+                        with open(filepath, 'wb') as f:
+                            total_size = int(response.headers.get('Content-Length', 0))
+                            total_mb = total_size / (1024 * 1024)
+                            block_size = 8192 * 128  # 1MB blocks for fewer updates
+                            bytes_downloaded = 0
+                            last_reported_percent = -1
+
+                            # Only print progress every 10%
+                            while True:
+                                block = response.read(block_size)
+                                if not block:
+                                    break
+                                f.write(block)
+                                bytes_downloaded += len(block)
+
+                                # Only report progress every 10% or at end
+                                if total_size > 0:
+                                    percent = int((bytes_downloaded * 100) / total_size)
+                                    if percent >= last_reported_percent + 10 or bytes_downloaded >= total_size:
+                                        downloaded_mb = bytes_downloaded / (1024 * 1024)
+                                        print(f"  {percent}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)")
+                                        last_reported_percent = percent
+
+                    file_size = filepath.stat().st_size / (1024 * 1024)
+                    print(f"  ✓ Downloaded {filename} ({file_size:.1f} MB)")
+                    downloaded.append(filename)
+                    break  # Success, exit retry loop
+
+                except urllib.error.HTTPError as e:
+                    if e.code == 403:
+                        print(f"  ⚠️  Access denied for {filename}. You may need to:")
+                        print("     1. Visit https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/IXA7BM")
+                        print("     2. Register an account and request access")
+                        print(f"     3. Download {filename} manually to {download_path}")
+                        print(f"  Skipping {filename} for now...")
+                        skipped.append(filename)
+                        break  # Don't retry on 403
+                    else:
+                        if attempt < max_retries - 1:
+                            print(f"  ⚠️  HTTP Error {e.code}: {e.reason} (attempt {attempt + 1}/{max_retries})")
+                            print(f"  Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                        else:
+                            print(f"  ✗ HTTP Error {e.code}: {e.reason} (all retries failed)")
+                            raise
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"  ⚠️  Failed: {e} (attempt {attempt + 1}/{max_retries})")
+                        print(f"  Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        # Clean up partial download
+                        if filepath.exists():
+                            filepath.unlink()
+                    else:
+                        print(f"  ✗ Failed to download {filename} after {max_retries} attempts: {e}")
+                        raise
 
     return {
         "download_dir": str(download_path),
         "downloaded_files": downloaded,
         "skipped_files": skipped,
         "total_files": len(files),
+        "edges_file": str(download_path / "kg.csv"),  # Main edges file
+        "nodes_file": str(download_path / "nodes.csv"),  # Basic node info
+        "drug_features_file": str(download_path / "drug_features.csv"),
+        "disease_features_file": str(download_path / "disease_features.csv"),
     }
 
 
