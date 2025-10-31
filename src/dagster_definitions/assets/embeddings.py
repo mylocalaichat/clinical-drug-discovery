@@ -142,20 +142,17 @@ def flattened_embeddings(
 
     # Parse embedding column (stored as string representation of list)
     import ast
-    embeddings_data = []
-    for _, row in embeddings_df.iterrows():
-        embedding = np.array(ast.literal_eval(row['embedding']))
-        embeddings_data.append({
-            'node_id': str(row['node_id']),
-            'node_name': row['node_name'],
-            'node_type': row['node_type'],
-            'embedding': embedding
-        })
 
-    context.log.info(f"Parsed {len(embeddings_data)} embeddings")
+    context.log.info("Parsing embeddings using vectorized operations...")
 
-    # Create DataFrame
-    embeddings_df = pd.DataFrame(embeddings_data)
+    # Vectorized parsing - much faster than iterrows()
+    embeddings_df['embedding'] = embeddings_df['embedding'].apply(ast.literal_eval).apply(np.array)
+    embeddings_df['node_id'] = embeddings_df['node_id'].astype(str)
+
+    # Keep only required columns
+    embeddings_df = embeddings_df[['node_id', 'node_name', 'node_type', 'embedding']]
+
+    context.log.info(f"Parsed {len(embeddings_df)} embeddings")
 
     # Flatten embeddings into separate columns
     context.log.info("Flattening embeddings into columns...")
