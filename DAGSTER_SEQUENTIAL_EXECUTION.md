@@ -57,7 +57,7 @@ This ensures:
   - GPU/CPU intensive (training neural networks)
   - Long-running (100 epochs)
 
-- If `gnn_embeddings` and `hgt_embeddings` run in parallel:
+- If multiple embedding assets run in parallel:
   - 2x memory consumption → OOM errors
   - GPU contention → slower training
   - System becomes unresponsive
@@ -67,9 +67,7 @@ This ensures:
 - Example execution order:
   1. `download_data` ✓
   2. `gnn_embeddings` ✓ (waits for #1)
-  3. `hgt_embeddings` ✓ (waits for #2)
-  4. `flattened_embeddings` ✓ (waits for #3)
-  5. `hgt_flattened_embeddings` ✓ (waits for #4)
+  3. `flattened_embeddings` ✓ (waits for #2)
 
 ## Trade-offs
 
@@ -94,7 +92,7 @@ Navigate to: http://localhost:3000
 
 ### Materializing Assets:
 1. Go to **Assets** tab
-2. Select the assets you want to materialize (e.g., `hgt_embeddings`)
+2. Select the assets you want to materialize (e.g., `gnn_embeddings`)
 3. Click **Materialize**
 4. Assets will execute sequentially
 
@@ -103,22 +101,19 @@ Navigate to: http://localhost:3000
 **Data Loading:**
 - `download_data` - Download PrimeKG from Harvard Dataverse
 
-**Embeddings (choose one or both):**
+**Embeddings:**
 - `gnn_embeddings` - GraphSAGE baseline
-- `hgt_embeddings` - HGT with contrastive learning
 
 **Flattened Embeddings:**
 - `flattened_embeddings` - From GNN
-- `hgt_flattened_embeddings` - From HGT
 
 **Visualizations:**
 - `embedding_visualizations` - GNN visualizations
-- `hgt_embedding_visualizations` - HGT visualizations
 
 ### Typical Workflow:
 1. Materialize `download_data` first
-2. Then materialize `hgt_embeddings` (or `gnn_embeddings`)
-3. Then materialize `hgt_flattened_embeddings`
+2. Then materialize `gnn_embeddings`
+3. Then materialize `flattened_embeddings`
 4. Optionally materialize visualizations
 
 ## When You Might Want Parallelism
@@ -139,10 +134,10 @@ To verify sequential execution:
 
 ### In Logs:
 ```
-[2024-01-15 10:00:00] Starting gnn_embeddings
-[2024-01-15 10:15:00] Completed gnn_embeddings
-[2024-01-15 10:15:01] Starting hgt_embeddings  <-- Waits for previous
-[2024-01-15 10:30:00] Completed hgt_embeddings
+[2024-01-15 10:00:00] Starting download_data
+[2024-01-15 10:05:00] Completed download_data
+[2024-01-15 10:05:01] Starting gnn_embeddings  <-- Waits for previous
+[2024-01-15 10:20:00] Completed gnn_embeddings
 ```
 
 ## Current Configuration Summary

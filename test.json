@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "mcp-memgraph": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp-memgraph",
+        "--python",
+        "3.13",
+        "mcp-memgraph"
+      ],
+      "env": {}
+    }
+  }
+}

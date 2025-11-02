@@ -1,5 +1,7 @@
 # Quick Pipeline Test - 10 Epochs
 
+> **⚠️ OBSOLETE:** This document was for testing HGT embeddings which have been removed from the project. The content below is no longer applicable.
+
 ## Strategy
 
 ✅ **Smart approach:** Get end-to-end pipeline working first, optimize later.
