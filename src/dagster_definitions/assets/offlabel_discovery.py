@@ -1012,7 +1012,7 @@ def offlabel_predictions_db(context: AssetExecutionContext) -> Output[None]:
         # Load data using COPY with streaming batch reads
         from io import StringIO
 
-        chunksize = 50000
+        chunksize = 1000000  # 1 million rows per batch for faster loading
         context.log.info(f"Streaming data in batches of {chunksize:,} rows...")
 
         # Stream CSV file in chunks and load directly to PostgreSQL
@@ -1070,26 +1070,28 @@ def offlabel_predictions_db(context: AssetExecutionContext) -> Output[None]:
 
         context.log.info(f"✓ Data loaded successfully - Total: {rows_loaded:,} rows")
 
+        # Create indexes for fast queries (part of the same transaction)
+        context.log.info("Creating indexes for fast queries (this may take a few minutes)...")
+        indexes = [
+            ("idx_disease_id", "disease_id"),
+            ("idx_drug_id", "drug_id"),
+            ("idx_disease_name", "disease_name"),
+            ("idx_drug_name", "drug_name"),
+            ("idx_prediction_score", "prediction_score DESC"),
+            ("idx_disease_score", "disease_name, prediction_score DESC"),
+            ("idx_drug_disease", "drug_id, disease_id"),  # Composite index for lookups
+        ]
+
+        for idx_name, idx_columns in indexes:
+            context.log.info(f"  Creating index {idx_name} on ({idx_columns})...")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {postgres_schema}.{table_name} ({idx_columns})")
+            context.log.info(f"  ✓ Index {idx_name} created")
+
+        context.log.info("✓ All indexes created successfully")
+
     finally:
         cursor.close()
         raw_conn.close()
-
-    context.log.info("Creating indexes for fast queries (this may take a few minutes)...")
-    indexes = [
-        ("idx_disease_name", "disease_name"),
-        ("idx_drug_name", "drug_name"),
-        ("idx_prediction_score", "prediction_score DESC"),
-        ("idx_disease_score", "disease_name, prediction_score DESC"),
-    ]
-
-    with engine.connect() as conn:
-        # Create indexes with progress indication
-        for idx_name, idx_columns in tqdm(indexes, desc="Creating indexes", unit="index"):
-            context.log.info(f"Creating index {idx_name}...")
-            conn.execute(text(f"CREATE INDEX {idx_name} ON {postgres_schema}.{table_name} ({idx_columns})"))
-            conn.commit()
-
-        context.log.info("✓ All indexes created successfully")
 
     # Verify data
     with engine.connect() as conn:
