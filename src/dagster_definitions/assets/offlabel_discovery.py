@@ -104,65 +104,6 @@ def offlabel_edges_filtered(context: AssetExecutionContext, download_data: dict)
 
 
 @asset
-def offlabel_node_metadata(context: AssetExecutionContext, download_data: dict) -> Output[Dict[str, Any]]:
-    """
-    Load node metadata from CSV files.
-
-    Args:
-        download_data: Dictionary containing download information from download_data asset
-
-    Returns:
-        Dictionary with node metadata DataFrame and output file path
-    """
-    context.log.info("Loading node metadata from CSV...")
-
-    # Use edges file from download_data asset to extract node metadata
-    edges_file = download_data["edges_file"]
-    context.log.info(f"Extracting node metadata from {edges_file}")
-
-    loader = CSVGraphLoader(data_dir=Path(edges_file).parent)
-
-    try:
-        nodes_df = loader.get_node_metadata()
-
-        if len(nodes_df) == 0:
-            context.log.error("No nodes loaded from CSV!")
-            context.log.error("Please ensure:")
-            context.log.error("  1. PrimeKG data has been downloaded (run download_data asset first)")
-            raise ValueError("No nodes found in CSV files. Cannot proceed with off-label pipeline.")
-
-        context.log.info(f"Loaded {len(nodes_df):,} nodes")
-
-        # Get node type distribution
-        node_type_counts = nodes_df['node_type'].value_counts().to_dict()
-
-        # Save to data directory
-        output_dir = Path("data/06_models/offlabel")
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        nodes_path = output_dir / "01_node_metadata.csv"
-        nodes_df.to_csv(nodes_path, index=False)
-        context.log.info(f"Saved node metadata to {nodes_path}")
-
-        return Output(
-            value={
-                "nodes_df": nodes_df,
-                "nodes_file": str(nodes_path),
-                "num_nodes": len(nodes_df),
-            },
-            metadata={
-                "num_nodes": len(nodes_df),
-                "num_node_types": len(node_type_counts),
-                "node_types": MetadataValue.json(node_type_counts),
-                "output_file": str(nodes_path),
-            },
-        )
-
-    finally:
-        loader.close()
-
-
-@asset
 def offlabel_edges_pruned(
     context: AssetExecutionContext,
     offlabel_edges_filtered: Dict[str, Any],
@@ -242,6 +183,69 @@ def offlabel_edges_pruned(
                 "protein_protein_before": initial_protein_protein,
                 "protein_protein_after": final_protein_protein,
                 "output_file": str(pruned_path),
+            },
+        )
+
+    finally:
+        loader.close()
+
+
+@asset
+def offlabel_node_metadata(
+    context: AssetExecutionContext,
+    offlabel_edges_pruned: Dict[str, Any]
+) -> Output[Dict[str, Any]]:
+    """
+    Extract node metadata from pruned edges.
+
+    Args:
+        offlabel_edges_pruned: Dictionary containing pruned edges DataFrame and file path
+
+    Returns:
+        Dictionary with node metadata DataFrame and output file path
+    """
+    context.log.info("Extracting node metadata from pruned edges...")
+
+    # Get pruned edges DataFrame from upstream asset
+    pruned_edges_df = offlabel_edges_pruned["edges_df"]
+    context.log.info(f"Using pruned edges from {offlabel_edges_pruned['edges_file']}")
+    context.log.info(f"Extracting nodes from {len(pruned_edges_df):,} pruned edges")
+
+    # Use CSVGraphLoader with pruned edges to extract node metadata
+    loader = CSVGraphLoader(edges_df=pruned_edges_df)
+
+    try:
+        nodes_df = loader.get_node_metadata()
+
+        if len(nodes_df) == 0:
+            context.log.error("No nodes extracted from pruned edges!")
+            raise ValueError("No nodes found in pruned edges. Cannot proceed with off-label pipeline.")
+
+        context.log.info(f"Extracted {len(nodes_df):,} unique nodes from pruned graph")
+
+        # Get node type distribution
+        node_type_counts = nodes_df['node_type'].value_counts().to_dict()
+
+        # Save to data directory
+        output_dir = Path("data/06_models/offlabel")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        nodes_path = output_dir / "01_node_metadata.csv"
+        nodes_df.to_csv(nodes_path, index=False)
+        context.log.info(f"Saved node metadata to {nodes_path}")
+
+        return Output(
+            value={
+                "nodes_df": nodes_df,
+                "nodes_file": str(nodes_path),
+                "num_nodes": len(nodes_df),
+            },
+            metadata={
+                "num_nodes": len(nodes_df),
+                "num_node_types": len(node_type_counts),
+                "node_types": MetadataValue.json(node_type_counts),
+                "output_file": str(nodes_path),
+                "source_edges": offlabel_edges_pruned['edges_file'],
             },
         )
 

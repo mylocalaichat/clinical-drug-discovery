@@ -307,13 +307,19 @@ class CSVGraphLoader:
         # Filter by relation type
         filtered_df = self.all_edges_df[self.all_edges_df['relation'].isin(INCLUSION_EDGE_TYPES)].copy()
 
-        # Rename columns to match expected format
-        filtered_df = filtered_df.rename(columns={
+        # Rename columns to match expected format (including name columns if they exist)
+        rename_dict = {
             'x_id': 'source_id',
             'x_type': 'source_type',
             'y_id': 'target_id',
             'y_type': 'target_type'
-        })
+        }
+        if 'x_name' in filtered_df.columns:
+            rename_dict['x_name'] = 'source_name'
+        if 'y_name' in filtered_df.columns:
+            rename_dict['y_name'] = 'target_name'
+
+        filtered_df = filtered_df.rename(columns=rename_dict)
 
         if len(filtered_df) == 0:
             logger.warning("No edges found with the specified edge types!")
@@ -333,23 +339,43 @@ class CSVGraphLoader:
         """
         logger.info("Extracting node metadata from edges...")
 
+        # Detect column naming scheme (original CSV uses x_id/y_id, filtered uses source_id/target_id)
+        if 'x_id' in self.all_edges_df.columns:
+            source_id_col, source_type_col, source_name_col = 'x_id', 'x_type', 'x_name'
+            target_id_col, target_type_col, target_name_col = 'y_id', 'y_type', 'y_name'
+        else:
+            source_id_col, source_type_col, source_name_col = 'source_id', 'source_type', 'source_id'
+            target_id_col, target_type_col, target_name_col = 'target_id', 'target_type', 'target_id'
+
+            # Check if name columns exist (they may not in filtered DataFrames)
+            if 'source_name' in self.all_edges_df.columns:
+                source_name_col = 'source_name'
+            if 'target_name' in self.all_edges_df.columns:
+                target_name_col = 'target_name'
+
         # Extract unique source nodes
-        source_nodes = self.all_edges_df[['x_id', 'x_type', 'x_name']].rename(columns={
-            'x_id': 'node_id',
-            'x_type': 'node_type',
-            'x_name': 'node_name'
-        })
+        source_cols = [source_id_col, source_type_col]
+        if source_name_col in self.all_edges_df.columns:
+            source_cols.append(source_name_col)
+
+        source_nodes = self.all_edges_df[source_cols].copy()
+        source_nodes.columns = ['node_id', 'node_type'] if len(source_cols) == 2 else ['node_id', 'node_type', 'node_name']
 
         # Extract unique target nodes
-        target_nodes = self.all_edges_df[['y_id', 'y_type', 'y_name']].rename(columns={
-            'y_id': 'node_id',
-            'y_type': 'node_type',
-            'y_name': 'node_name'
-        })
+        target_cols = [target_id_col, target_type_col]
+        if target_name_col in self.all_edges_df.columns:
+            target_cols.append(target_name_col)
+
+        target_nodes = self.all_edges_df[target_cols].copy()
+        target_nodes.columns = ['node_id', 'node_type'] if len(target_cols) == 2 else ['node_id', 'node_type', 'node_name']
 
         # Combine and deduplicate
         all_nodes = pd.concat([source_nodes, target_nodes], ignore_index=True)
         nodes_df = all_nodes.drop_duplicates(subset=['node_id']).reset_index(drop=True)
+
+        # Add node_name column if it doesn't exist (use node_id as fallback)
+        if 'node_name' not in nodes_df.columns:
+            nodes_df['node_name'] = nodes_df['node_id']
 
         logger.info(f"Extracted metadata for {len(nodes_df):,} nodes of {len(nodes_df['node_type'].unique())} types")
         return nodes_df
