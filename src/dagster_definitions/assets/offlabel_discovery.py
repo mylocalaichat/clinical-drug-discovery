@@ -19,6 +19,7 @@ from typing import Dict, Any
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 from dagster import asset, AssetExecutionContext, Output, MetadataValue
 
 from clinical_drug_discovery.lib.offlabel_data_loading import (
@@ -634,5 +635,243 @@ def offlabel_model_evaluation(
             "false_positives": serializable_metrics['false_positives'],
             "false_negatives": serializable_metrics['false_negatives'],
             "all_metrics": MetadataValue.json(serializable_metrics),
+        },
+    )
+
+
+@asset
+def offlabel_novel_predictions(
+    context: AssetExecutionContext,
+    offlabel_trained_model: Dict[str, Any],
+    offlabel_hetero_graph: Dict[str, Any],
+    offlabel_node_metadata: Dict[str, Any],
+    offlabel_edges_pruned: Dict[str, Any],
+) -> Output[pd.DataFrame]:
+    """
+    Step 10: Predict novel off-label drug uses.
+
+    This generates all possible drug-disease pairs, excludes known relationships,
+    and predicts the likelihood of each being a valid off-label use.
+
+    Args:
+        offlabel_trained_model: Trained model
+        offlabel_hetero_graph: Graph structure
+        offlabel_node_metadata: Node information for generating pairs
+        offlabel_edges_pruned: All edges to check for known relationships
+
+    Returns:
+        DataFrame with predicted novel off-label uses ranked by confidence
+    """
+    context.log.info("=" * 80)
+    context.log.info("STEP 10: Predicting novel off-label drug uses")
+    context.log.info("=" * 80)
+
+    # Load model and data
+    model = offlabel_trained_model['model']
+    device = offlabel_trained_model['device']
+    node_mapping = offlabel_trained_model['node_mapping']
+    train_graph = offlabel_hetero_graph['graph']
+    nodes_df = offlabel_node_metadata['nodes_df']
+    edges_df = offlabel_edges_pruned['edges_df']
+
+    # Load best model checkpoint
+    output_dir = Path("data/06_models/offlabel")
+    checkpoint_path = output_dir / "08_best_model.pt"
+
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        context.log.info(f"Loaded best model from {checkpoint_path}")
+
+    # Get all drugs and diseases that are in the node_mapping
+    all_drugs = [drug_id for drug_id in nodes_df[nodes_df['node_type'] == 'drug']['node_id']
+                 if drug_id in node_mapping.get('drug', {})]
+    all_diseases = [disease_id for disease_id in nodes_df[nodes_df['node_type'] == 'disease']['node_id']
+                    if disease_id in node_mapping.get('disease', {})]
+
+    context.log.info(f"Total drugs in graph: {len(all_drugs):,}")
+    context.log.info(f"Total diseases in graph: {len(all_diseases):,}")
+    context.log.info(f"Total possible pairs: {len(all_drugs) * len(all_diseases):,}")
+
+    # Get known relationships to exclude
+    known_pairs = set()
+
+    # Collect all known drug-disease relationships
+    for relation in ['indication', 'off-label use', 'contraindication']:
+        rel_edges = edges_df[edges_df['relation'] == relation]
+        for _, row in rel_edges.iterrows():
+            # Normalize to (drug_id, disease_id)
+            if row['source_type'] == 'drug' and row['target_type'] == 'disease':
+                known_pairs.add((row['source_id'], row['target_id']))
+            elif row['source_type'] == 'disease' and row['target_type'] == 'drug':
+                known_pairs.add((row['target_id'], row['source_id']))
+
+    context.log.info(f"Known drug-disease pairs to exclude: {len(known_pairs):,}")
+
+    # Generate candidate pairs with intelligent sampling
+    # Strategy: Only predict for drugs/diseases with at least some connectivity
+    context.log.info("Generating candidate pairs with intelligent sampling...")
+
+    # Get sampling strategy from env
+    max_candidates = int(os.getenv("OFFLABEL_MAX_CANDIDATES", "100000"))
+    min_drug_degree = int(os.getenv("OFFLABEL_MIN_DRUG_DEGREE", "5"))
+    min_disease_degree = int(os.getenv("OFFLABEL_MIN_DISEASE_DEGREE", "5"))
+
+    # Count node degrees (number of edges per node) - vectorized for speed
+    context.log.info("Counting node degrees...")
+    drug_degrees = {}
+    disease_degrees = {}
+
+    # Vectorized approach - much faster than iterrows
+    drug_source_mask = edges_df['source_type'] == 'drug'
+    drug_target_mask = edges_df['target_type'] == 'drug'
+    disease_source_mask = edges_df['source_type'] == 'disease'
+    disease_target_mask = edges_df['target_type'] == 'disease'
+
+    # Count drug degrees
+    drug_source_counts = edges_df[drug_source_mask]['source_id'].value_counts().to_dict()
+    drug_target_counts = edges_df[drug_target_mask]['target_id'].value_counts().to_dict()
+
+    for drug_id in set(list(drug_source_counts.keys()) + list(drug_target_counts.keys())):
+        drug_degrees[drug_id] = drug_source_counts.get(drug_id, 0) + drug_target_counts.get(drug_id, 0)
+
+    # Count disease degrees
+    disease_source_counts = edges_df[disease_source_mask]['source_id'].value_counts().to_dict()
+    disease_target_counts = edges_df[disease_target_mask]['target_id'].value_counts().to_dict()
+
+    for disease_id in set(list(disease_source_counts.keys()) + list(disease_target_counts.keys())):
+        disease_degrees[disease_id] = disease_source_counts.get(disease_id, 0) + disease_target_counts.get(disease_id, 0)
+
+    # Filter drugs/diseases by minimum degree
+    filtered_drugs = [d for d in all_drugs if drug_degrees.get(d, 0) >= min_drug_degree]
+    filtered_diseases = [d for d in all_diseases if disease_degrees.get(d, 0) >= min_disease_degree]
+
+    context.log.info(f"Filtered drugs (degree >= {min_drug_degree}): {len(filtered_drugs):,} / {len(all_drugs):,}")
+    context.log.info(f"Filtered diseases (degree >= {min_disease_degree}): {len(filtered_diseases):,} / {len(all_diseases):,}")
+    context.log.info(f"Potential pairs: {len(filtered_drugs) * len(filtered_diseases):,}")
+
+    # Generate candidates (exclude known relationships)
+    context.log.info(f"Generating candidate pairs from {len(filtered_drugs):,} drugs × {len(filtered_diseases):,} diseases...")
+    candidate_pairs = []
+
+    for drug_id in tqdm(filtered_drugs, desc="Generating pairs"):
+        for disease_id in filtered_diseases:
+            if (drug_id, disease_id) not in known_pairs:
+                candidate_pairs.append((drug_id, disease_id))
+
+    # If still too many, randomly sample
+    if len(candidate_pairs) > max_candidates:
+        context.log.info(f"Sampling {max_candidates:,} candidates from {len(candidate_pairs):,} total")
+        import random
+        random.seed(42)
+        candidate_pairs = random.sample(candidate_pairs, max_candidates)
+
+    context.log.info(f"Final candidate novel pairs: {len(candidate_pairs):,}")
+
+    # Predict on candidates
+    context.log.info("Running predictions on candidate pairs...")
+    context.log.info(f"Using device: {device}")
+
+    model = model.to(device)
+    train_graph = train_graph.to(device)
+    model.eval()
+
+    import time
+
+    # OPTIMIZATION: Pre-compute all node embeddings once!
+    context.log.info("Pre-computing node embeddings (this may take a minute)...")
+    embedding_start = time.time()
+
+    with torch.no_grad():
+        all_embeddings = model.encode(train_graph)
+
+    embedding_time = time.time() - embedding_start
+    context.log.info(f"Embeddings computed in {embedding_time:.1f}s")
+    context.log.info(f"  Drug embeddings: {all_embeddings['drug'].shape}")
+    context.log.info(f"  Disease embeddings: {all_embeddings['disease'].shape}")
+
+    # Now predict using pre-computed embeddings + MLP head
+    batch_size = int(os.getenv("OFFLABEL_INFERENCE_BATCH_SIZE", "10000"))  # Much larger since we're just doing MLP
+    context.log.info(f"Inference batch size: {batch_size}")
+
+    predictions = []
+    start_time = time.time()
+
+    with torch.no_grad():
+        for i in tqdm(range(0, len(candidate_pairs), batch_size), desc="Predicting"):
+            batch_pairs = candidate_pairs[i:i+batch_size]
+
+            drug_ids = [pair[0] for pair in batch_pairs]
+            disease_ids = [pair[1] for pair in batch_pairs]
+
+            # Get pre-computed embeddings
+            drug_indices = [node_mapping['drug'][drug_id] for drug_id in drug_ids]
+            disease_indices = [node_mapping['disease'][disease_id] for disease_id in disease_ids]
+
+            drug_embs = all_embeddings['drug'][drug_indices]
+            disease_embs = all_embeddings['disease'][disease_indices]
+
+            # Use the MLP head only (super fast!)
+            batch_predictions = model.link_predictor(drug_embs, disease_embs)
+            predictions.extend(batch_predictions.cpu().numpy())
+
+    elapsed_time = time.time() - start_time
+    total_time = embedding_time + elapsed_time
+    context.log.info(f"Prediction completed in {elapsed_time:.1f}s ({len(candidate_pairs)/elapsed_time:.0f} pairs/sec)")
+    context.log.info(f"Total time (embedding + prediction): {total_time:.1f}s")
+
+    # Create results DataFrame
+    results_df = pd.DataFrame({
+        'drug_id': [pair[0] for pair in candidate_pairs],
+        'disease_id': [pair[1] for pair in candidate_pairs],
+        'prediction_score': predictions
+    })
+
+    # Add drug and disease names if available
+    drug_names = nodes_df[nodes_df['node_type'] == 'drug'].set_index('node_id')['node_name'].to_dict()
+    disease_names = nodes_df[nodes_df['node_type'] == 'disease'].set_index('node_id')['node_name'].to_dict()
+
+    results_df['drug_name'] = results_df['drug_id'].map(drug_names).fillna(results_df['drug_id'])
+    results_df['disease_name'] = results_df['disease_id'].map(disease_names).fillna(results_df['disease_id'])
+
+    # Sort by prediction score (highest first)
+    results_df = results_df.sort_values('prediction_score', ascending=False).reset_index(drop=True)
+
+    # Add rank
+    results_df['rank'] = range(1, len(results_df) + 1)
+
+    # Reorder columns
+    results_df = results_df[['rank', 'drug_id', 'drug_name', 'disease_id', 'disease_name', 'prediction_score']]
+
+    # Save results
+    output_path = Path("data/07_model_output/offlabel") / "10_novel_predictions.csv"
+    results_df.to_csv(output_path, index=False)
+
+    # Save top predictions separately
+    top_n = int(os.getenv("OFFLABEL_TOP_N_PREDICTIONS", "1000"))
+    top_predictions_path = Path("data/07_model_output/offlabel") / f"10_top_{top_n}_predictions.csv"
+    results_df.head(top_n).to_csv(top_predictions_path, index=False)
+
+    context.log.info(f"Saved all predictions to {output_path}")
+    context.log.info(f"Saved top {top_n} predictions to {top_predictions_path}")
+
+    # Log top 10 predictions
+    context.log.info("\nTop 10 Novel Off-Label Predictions:")
+    context.log.info("=" * 80)
+    for _, row in results_df.head(10).iterrows():
+        context.log.info(f"{int(row['rank']):3d}. {row['drug_name'][:40]:40s} -> {row['disease_name'][:40]:40s} | Score: {row['prediction_score']:.4f}")
+
+    return Output(
+        value=results_df,
+        metadata={
+            "total_candidates": len(candidate_pairs),
+            "total_drugs": len(all_drugs),
+            "total_diseases": len(all_diseases),
+            "known_pairs_excluded": len(known_pairs),
+            "top_score": float(results_df['prediction_score'].iloc[0]),
+            "median_score": float(results_df['prediction_score'].median()),
+            "high_confidence_count": int((results_df['prediction_score'] > 0.9).sum()),
+            "output_file": str(output_path),
+            "top_predictions_file": str(top_predictions_path),
         },
     )

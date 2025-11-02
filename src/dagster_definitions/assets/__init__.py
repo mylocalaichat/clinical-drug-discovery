@@ -44,6 +44,7 @@ from .offlabel_discovery import (
     offlabel_hetero_graph,
     offlabel_trained_model,
     offlabel_model_evaluation,
+    offlabel_novel_predictions,
 )
 
 # TODO: Enable link prediction assets after installing OpenMP (brew install libomp)
@@ -97,6 +98,7 @@ __all__ = [
     "offlabel_hetero_graph",
     "offlabel_trained_model",
     "offlabel_model_evaluation",
+    "offlabel_novel_predictions",
     # Link Prediction (disabled until OpenMP installed)
     # "link_prediction_drugs",
     # "link_prediction_diseases",
