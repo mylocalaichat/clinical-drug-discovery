@@ -21,6 +21,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from dagster import asset, AssetExecutionContext, Output, MetadataValue
+from sqlalchemy import create_engine, text
 
 from clinical_drug_discovery.lib.offlabel_data_loading import (
     CSVGraphLoader,
@@ -759,12 +760,14 @@ def offlabel_novel_predictions(
             if (drug_id, disease_id) not in known_pairs:
                 candidate_pairs.append((drug_id, disease_id))
 
-    # If still too many, randomly sample
-    if len(candidate_pairs) > max_candidates:
+    # Optional: Cap if explicitly set (set to 0 or very high to disable)
+    if max_candidates > 0 and len(candidate_pairs) > max_candidates:
         context.log.info(f"Sampling {max_candidates:,} candidates from {len(candidate_pairs):,} total")
         import random
         random.seed(42)
         candidate_pairs = random.sample(candidate_pairs, max_candidates)
+    else:
+        context.log.info(f"Using ALL {len(candidate_pairs):,} candidate pairs (no sampling)")
 
     context.log.info(f"Final candidate novel pairs: {len(candidate_pairs):,}")
 
@@ -843,35 +846,323 @@ def offlabel_novel_predictions(
     # Reorder columns
     results_df = results_df[['rank', 'drug_id', 'drug_name', 'disease_id', 'disease_name', 'prediction_score']]
 
-    # Save results
-    output_path = Path("data/07_model_output/offlabel") / "10_novel_predictions.csv"
+    # Save ALL results
+    output_path = Path("data/07_model_output/offlabel") / "10_all_predictions.csv"
     results_df.to_csv(output_path, index=False)
+    context.log.info(f"Saved ALL {len(results_df):,} predictions to {output_path}")
 
-    # Save top predictions separately
+    # Also save top N for quick reference
     top_n = int(os.getenv("OFFLABEL_TOP_N_PREDICTIONS", "1000"))
     top_predictions_path = Path("data/07_model_output/offlabel") / f"10_top_{top_n}_predictions.csv"
     results_df.head(top_n).to_csv(top_predictions_path, index=False)
-
-    context.log.info(f"Saved all predictions to {output_path}")
     context.log.info(f"Saved top {top_n} predictions to {top_predictions_path}")
 
+    # Create per-disease summary (top drugs per disease)
+    context.log.info("Creating per-disease summary...")
+    disease_groups = results_df.groupby('disease_id')
+
+    disease_summary = []
+    for disease_id, group in disease_groups:
+        top_drugs = group.head(10)  # Top 10 drugs per disease
+        disease_summary.append({
+            'disease_id': disease_id,
+            'disease_name': group.iloc[0]['disease_name'],
+            'num_candidates': len(group),
+            'top_drug': top_drugs.iloc[0]['drug_name'],
+            'top_score': top_drugs.iloc[0]['prediction_score'],
+            'mean_score': group['prediction_score'].mean(),
+            'high_confidence_count': (group['prediction_score'] > 0.9).sum()
+        })
+
+    disease_summary_df = pd.DataFrame(disease_summary)
+    disease_summary_df = disease_summary_df.sort_values('top_score', ascending=False)
+    summary_path = Path("data/07_model_output/offlabel") / "10_disease_summary.csv"
+    disease_summary_df.to_csv(summary_path, index=False)
+    context.log.info(f"Saved disease summary to {summary_path}")
+
     # Log top 10 predictions
-    context.log.info("\nTop 10 Novel Off-Label Predictions:")
+    context.log.info("\nTop 10 Novel Off-Label Predictions (Overall):")
     context.log.info("=" * 80)
     for _, row in results_df.head(10).iterrows():
         context.log.info(f"{int(row['rank']):3d}. {row['drug_name'][:40]:40s} -> {row['disease_name'][:40]:40s} | Score: {row['prediction_score']:.4f}")
 
+    # Log top 5 diseases by best drug candidate
+    context.log.info("\nTop 5 Diseases by Best Drug Candidate:")
+    context.log.info("=" * 80)
+    for _, row in disease_summary_df.head(5).iterrows():
+        context.log.info(f"  {row['disease_name'][:50]:50s} | Best: {row['top_drug'][:30]:30s} ({row['top_score']:.4f})")
+
     return Output(
         value=results_df,
         metadata={
+            "total_predictions": len(results_df),
             "total_candidates": len(candidate_pairs),
             "total_drugs": len(all_drugs),
             "total_diseases": len(all_diseases),
+            "unique_diseases_predicted": len(disease_summary_df),
             "known_pairs_excluded": len(known_pairs),
             "top_score": float(results_df['prediction_score'].iloc[0]),
             "median_score": float(results_df['prediction_score'].median()),
+            "mean_score": float(results_df['prediction_score'].mean()),
             "high_confidence_count": int((results_df['prediction_score'] > 0.9).sum()),
-            "output_file": str(output_path),
+            "moderate_confidence_count": int((results_df['prediction_score'] > 0.7).sum()),
+            "all_predictions_file": str(output_path),
             "top_predictions_file": str(top_predictions_path),
+            "disease_summary_file": str(summary_path),
+        },
+    )
+
+
+@asset(
+    deps=["offlabel_novel_predictions"],
+    group_name="offlabel_discovery",
+    description="Load all predictions into PostgreSQL database for fast querying",
+)
+def offlabel_predictions_db(context: AssetExecutionContext) -> Output[None]:
+    """
+    Load the complete predictions dataset into PostgreSQL.
+
+    Creates a table 'offlabel_predictions' with:
+    - rank: integer
+    - drug_id: text
+    - drug_name: text (indexed for fast search)
+    - disease_id: text
+    - disease_name: text (indexed for fast search)
+    - prediction_score: float (indexed for fast sorting)
+
+    This enables fast SQL queries like:
+        SELECT * FROM offlabel_predictions
+        WHERE disease_name ILIKE '%Castleman%'
+        ORDER BY prediction_score DESC
+        LIMIT 10;
+    """
+    # Load environment variables
+    postgres_user = os.getenv("DAGSTER_POSTGRES_USER", "dagster_user")
+    postgres_password = os.getenv("DAGSTER_POSTGRES_PASSWORD", "dagster_password_123")
+    postgres_host = os.getenv("DAGSTER_POSTGRES_HOST", "localhost")
+    postgres_port = os.getenv("DAGSTER_POSTGRES_PORT", "5432")
+    postgres_db = os.getenv("DAGSTER_POSTGRES_DB", "clinical_drug_discovery_db")
+    postgres_schema = os.getenv("DAGSTER_POSTGRES_SCHEMA", "public")
+
+    # Create connection string
+    connection_string = f"postgresql://{postgres_user}:{postgres_password}@{postgres_host}:{postgres_port}/{postgres_db}"
+
+    context.log.info(f"Connecting to PostgreSQL database '{postgres_db}' on {postgres_host}:{postgres_port}")
+    context.log.info(f"Target schema: {postgres_schema}")
+    context.log.info(f"Target table: offlabel_predictions")
+
+    # Try to connect and provide helpful error messages
+    try:
+        engine = create_engine(connection_string)
+        with engine.connect() as conn:
+            # Test connection
+            conn.execute(text("SELECT 1"))
+            context.log.info("✓ Database connection successful")
+    except Exception as e:
+        context.log.error("✗ Cannot connect to PostgreSQL database")
+        context.log.error(f"   Error: {e}")
+        context.log.error("")
+        context.log.error("Please run the database setup script first:")
+        context.log.error("   python scripts/setup_postgres.py")
+        context.log.error("")
+        context.log.error("Or manually create the database and user:")
+        context.log.error(f"   createdb -U postgres {postgres_db}")
+        context.log.error(f"   createuser -U postgres {postgres_user}")
+        raise
+
+    # Load predictions CSV
+    predictions_file = Path("data/07_model_output/offlabel/10_all_predictions.csv")
+    context.log.info(f"Streaming predictions from {predictions_file}...")
+
+    # Create table and load data
+    table_name = "offlabel_predictions"
+    context.log.info(f"Loading data into PostgreSQL table '{table_name}'...")
+
+    # Get raw connection for all operations
+    raw_conn = engine.raw_connection()
+    cursor = raw_conn.cursor()
+
+    try:
+        # Ensure schema exists
+        if postgres_schema != 'public':
+            context.log.info(f"Ensuring schema '{postgres_schema}' exists...")
+            cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {postgres_schema}")
+            context.log.info(f"✓ Schema '{postgres_schema}' ready")
+
+        # Drop and create table
+        context.log.info(f"Dropping table {postgres_schema}.{table_name} if it exists...")
+        cursor.execute(f"DROP TABLE IF EXISTS {postgres_schema}.{table_name}")
+        context.log.info("✓ Dropped existing table if it existed")
+
+        # Create the table structure
+        context.log.info(f"Creating table '{postgres_schema}.{table_name}'...")
+        create_table_sql = f"""
+        CREATE TABLE {postgres_schema}.{table_name} (
+            rank INTEGER,
+            drug_id TEXT,
+            drug_name TEXT,
+            disease_id TEXT,
+            disease_name TEXT,
+            prediction_score FLOAT
+        )
+        """
+        cursor.execute(create_table_sql)
+        context.log.info(f"✓ Table '{postgres_schema}.{table_name}' created successfully")
+
+        # Load data using COPY with streaming batch reads
+        from io import StringIO
+
+        chunksize = 50000
+        context.log.info(f"Streaming data in batches of {chunksize:,} rows...")
+
+        # Stream CSV file in chunks and load directly to PostgreSQL
+        rows_loaded = 0
+        for chunk_num, chunk_df in enumerate(
+            pd.read_csv(predictions_file, chunksize=chunksize), start=1
+        ):
+            # Data validation and cleaning
+            if chunk_num == 1:  # Log sample data from first chunk
+                context.log.info("Sample data from first chunk:")
+                context.log.info(f"  Sample drug_id: {chunk_df['drug_id'].iloc[0]}")
+                context.log.info(f"  Sample disease_id: {chunk_df['disease_id'].iloc[0]}")
+                context.log.info(f"  Max drug_id length: {chunk_df['drug_id'].str.len().max()}")
+                context.log.info(f"  Max disease_id length: {chunk_df['disease_id'].str.len().max()}")
+                context.log.info(f"  Max drug_name length: {chunk_df['drug_name'].str.len().max()}")
+                context.log.info(f"  Max disease_name length: {chunk_df['disease_name'].str.len().max()}")
+                
+                # Check for problematic IDs
+                long_drug_ids = chunk_df[chunk_df['drug_id'].str.len() > 100]
+                long_disease_ids = chunk_df[chunk_df['disease_id'].str.len() > 100]
+                
+                if len(long_drug_ids) > 0:
+                    context.log.warning(f"Found {len(long_drug_ids)} drug_ids longer than 100 chars")
+                    context.log.warning(f"  Example: {long_drug_ids['drug_id'].iloc[0][:200]}...")
+                    
+                if len(long_disease_ids) > 0:
+                    context.log.warning(f"Found {len(long_disease_ids)} disease_ids longer than 100 chars")
+                    context.log.warning(f"  Example: {long_disease_ids['disease_id'].iloc[0][:200]}...")
+
+            # Convert chunk to CSV in memory
+            output = StringIO()
+            chunk_df.to_csv(output, sep='\t', header=False, index=False, na_rep='')
+            output.seek(0)
+
+            # Use COPY for fast bulk insert - NOTE: copy_from doesn't like qualified names
+            # So we use the COPY SQL command instead
+            try:
+                context.log.info(f"  Loading batch {chunk_num}...")
+                copy_sql = f"""
+                COPY {postgres_schema}.{table_name} (rank, drug_id, drug_name, disease_id, disease_name, prediction_score)
+                FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '')
+                """
+                cursor.copy_expert(copy_sql, output)
+                raw_conn.commit()
+                context.log.info(f"  ✓ Batch {chunk_num} loaded successfully")
+            except Exception as e:
+                raw_conn.rollback()
+                context.log.error(f"  ✗ COPY failed for batch {chunk_num}")
+                context.log.error(f"  Error: {e}")
+                raise
+
+            rows_loaded += len(chunk_df)
+            if chunk_num % 10 == 0 or chunk_num == 1:
+                context.log.info(f"  Progress: Loaded {rows_loaded:,} rows so far...")
+
+        context.log.info(f"✓ Data loaded successfully - Total: {rows_loaded:,} rows")
+
+    finally:
+        cursor.close()
+        raw_conn.close()
+
+    context.log.info("Creating indexes for fast queries (this may take a few minutes)...")
+    indexes = [
+        ("idx_disease_name", "disease_name"),
+        ("idx_drug_name", "drug_name"),
+        ("idx_prediction_score", "prediction_score DESC"),
+        ("idx_disease_score", "disease_name, prediction_score DESC"),
+    ]
+
+    with engine.connect() as conn:
+        # Create indexes with progress indication
+        for idx_name, idx_columns in tqdm(indexes, desc="Creating indexes", unit="index"):
+            context.log.info(f"Creating index {idx_name}...")
+            conn.execute(text(f"CREATE INDEX {idx_name} ON {postgres_schema}.{table_name} ({idx_columns})"))
+            conn.commit()
+
+        context.log.info("✓ All indexes created successfully")
+
+    # Verify data
+    with engine.connect() as conn:
+        result = conn.execute(text(f"SELECT COUNT(*) FROM {postgres_schema}.{table_name}"))
+        row_count = result.scalar()
+
+        result = conn.execute(text(f"SELECT MAX(prediction_score) FROM {postgres_schema}.{table_name}"))
+        max_score = result.scalar()
+
+        result = conn.execute(text(f"SELECT COUNT(DISTINCT disease_name) FROM {postgres_schema}.{table_name}"))
+        unique_diseases = result.scalar()
+
+        result = conn.execute(text(f"SELECT COUNT(DISTINCT drug_name) FROM {postgres_schema}.{table_name}"))
+        unique_drugs = result.scalar()
+
+    context.log.info(f"✓ Successfully loaded {row_count:,} predictions to {postgres_db}.{postgres_schema}.{table_name}")
+
+    return Output(
+        None,
+        metadata={
+            "database": postgres_db,
+            "schema": postgres_schema,
+            "table_name": table_name,
+            "full_table_path": f"{postgres_db}.{postgres_schema}.{table_name}",
+            "host": postgres_host,
+            "port": postgres_port,
+            "row_count": int(row_count),
+            "unique_diseases": int(unique_diseases),
+            "unique_drugs": int(unique_drugs),
+            "max_score": float(max_score),
+            "indexes_created": 4,
+            "query_example": MetadataValue.md(
+                f"""
+**Database:** `{postgres_db}`
+**Schema:** `{postgres_schema}`
+**Table:** `{table_name}`
+**Full Path:** `{postgres_db}.{postgres_schema}.{table_name}`
+
+Example queries:
+
+```sql
+-- Top 10 drugs for a disease
+SELECT rank, drug_name, prediction_score
+FROM {postgres_schema}.{table_name}
+WHERE disease_name ILIKE '%Castleman%'
+ORDER BY prediction_score DESC
+LIMIT 10;
+
+-- All high-confidence predictions for a disease
+SELECT drug_name, prediction_score
+FROM {postgres_schema}.{table_name}
+WHERE disease_name = 'Castleman disease'
+  AND prediction_score > 0.9
+ORDER BY prediction_score DESC;
+
+-- Find diseases for a specific drug
+SELECT disease_name, prediction_score
+FROM {postgres_schema}.{table_name}
+WHERE drug_name ILIKE '%Triamterene%'
+ORDER BY prediction_score DESC
+LIMIT 20;
+
+-- Summary statistics by disease
+SELECT disease_name,
+       COUNT(*) as candidate_count,
+       MAX(prediction_score) as top_score,
+       AVG(prediction_score) as avg_score
+FROM {postgres_schema}.{table_name}
+GROUP BY disease_name
+ORDER BY top_score DESC
+LIMIT 10;
+```
+                """
+            ),
         },
     )

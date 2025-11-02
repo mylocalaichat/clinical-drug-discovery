@@ -254,7 +254,7 @@ class CSVGraphLoader:
         pass
 
     def _precompute_relationships(self):
-        """Precompute relationship lookups for fast similarity calculations using vectorized operations."""
+        """Precompute relationship lookups for fast similarity calculations using vectorized batch operations."""
         logger.info("Precomputing relationship lookups for similarity calculations...")
 
         # Detect column naming scheme (original CSV uses x_id/y_id, filtered uses source_id/target_id)
@@ -263,35 +263,35 @@ class CSVGraphLoader:
         else:
             source_col, target_col = 'source_id', 'target_id'
 
-        # Drug -> Indications (vectorized)
-        self.drug_indications = defaultdict(set)
+        # Drug -> Indications (batch groupby operation)
         indication_edges = self.all_edges_df[self.all_edges_df['relation'] == 'indication']
-        for src, tgt in zip(indication_edges[source_col], indication_edges[target_col]):
-            self.drug_indications[src].add(tgt)
+        self.drug_indications = defaultdict(set,
+            indication_edges.groupby(source_col)[target_col].apply(set).to_dict()
+        )
 
-        # Drug -> Proteins (vectorized)
-        self.drug_proteins = defaultdict(set)
+        # Drug -> Proteins (batch groupby operation)
         drug_protein_edges = self.all_edges_df[self.all_edges_df['relation'] == 'drug_protein']
-        for src, tgt in zip(drug_protein_edges[source_col], drug_protein_edges[target_col]):
-            self.drug_proteins[src].add(tgt)
+        self.drug_proteins = defaultdict(set,
+            drug_protein_edges.groupby(source_col)[target_col].apply(set).to_dict()
+        )
 
-        # Protein -> Biological Processes (vectorized)
-        self.protein_bioprocesses = defaultdict(set)
+        # Protein -> Biological Processes (batch groupby operation)
         bp_edges = self.all_edges_df[self.all_edges_df['relation'] == 'bioprocess_protein']
-        for src, tgt in zip(bp_edges[source_col], bp_edges[target_col]):
-            self.protein_bioprocesses[tgt].add(src)
+        self.protein_bioprocesses = defaultdict(set,
+            bp_edges.groupby(target_col)[source_col].apply(set).to_dict()
+        )
 
-        # Protein -> Molecular Functions (vectorized)
-        self.protein_molfuncs = defaultdict(set)
+        # Protein -> Molecular Functions (batch groupby operation)
         mf_edges = self.all_edges_df[self.all_edges_df['relation'] == 'molfunc_protein']
-        for src, tgt in zip(mf_edges[source_col], mf_edges[target_col]):
-            self.protein_molfuncs[tgt].add(src)
+        self.protein_molfuncs = defaultdict(set,
+            mf_edges.groupby(target_col)[source_col].apply(set).to_dict()
+        )
 
-        # Protein -> Diseases (vectorized)
-        self.protein_diseases = defaultdict(set)
+        # Protein -> Diseases (batch groupby operation)
         disease_protein_edges = self.all_edges_df[self.all_edges_df['relation'] == 'disease_protein']
-        for src, tgt in zip(disease_protein_edges[source_col], disease_protein_edges[target_col]):
-            self.protein_diseases[tgt].add(src)
+        self.protein_diseases = defaultdict(set,
+            disease_protein_edges.groupby(target_col)[source_col].apply(set).to_dict()
+        )
 
         logger.info("Relationship lookups precomputed successfully")
 
@@ -741,20 +741,25 @@ def create_heterogeneous_graph(
         source_type = edges['source_type'].iloc[0]
         target_type = edges['target_type'].iloc[0]
 
-        # Map node IDs to indices
-        source_indices = []
-        target_indices = []
+        # Map node IDs to indices using vectorized operations
+        # Create series with node mappings for batch lookup
+        source_mapping = pd.Series(node_mapping[source_type])
+        target_mapping = pd.Series(node_mapping[target_type])
 
-        for _, edge in edges.iterrows():
-            src_id = edge['source_id']
-            tgt_id = edge['target_id']
+        # Batch map all source and target IDs
+        edges_mapped = edges.copy()
+        edges_mapped['source_idx'] = edges_mapped['source_id'].map(source_mapping)
+        edges_mapped['target_idx'] = edges_mapped['target_id'].map(target_mapping)
 
-            if src_id in node_mapping[source_type] and tgt_id in node_mapping[target_type]:
-                source_indices.append(node_mapping[source_type][src_id])
-                target_indices.append(node_mapping[target_type][tgt_id])
+        # Filter out edges where mapping failed (NaN values)
+        valid_edges = edges_mapped.dropna(subset=['source_idx', 'target_idx'])
 
-        if len(source_indices) == 0:
+        if len(valid_edges) == 0:
             continue
+
+        # Extract indices as lists
+        source_indices = valid_edges['source_idx'].astype(int).tolist()
+        target_indices = valid_edges['target_idx'].astype(int).tolist()
 
         # Create edge index tensor
         edge_index = torch.tensor([source_indices, target_indices], dtype=torch.long)
