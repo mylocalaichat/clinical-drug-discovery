@@ -551,12 +551,13 @@ def test_model(
     criterion = nn.BCELoss()
     test_metrics = evaluate(model, data, test_loader, criterion, device)
 
-    # Additional detailed metrics
+    # Additional detailed metrics (collect predictions for confusion matrix)
+    logger.info("Collecting predictions for detailed metrics...")
     all_predictions = []
     all_labels = []
 
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in tqdm(test_loader, desc="Collecting predictions", leave=False):
             drug_indices = batch['drug_index'].to(device, dtype=torch.long)
             disease_indices = batch['disease_index'].to(device, dtype=torch.long)
             labels = batch['label']

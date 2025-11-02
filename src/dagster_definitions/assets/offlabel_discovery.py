@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any
 
+import numpy as np
 import pandas as pd
 import torch
 from dagster import asset, AssetExecutionContext, Output, MetadataValue
@@ -596,10 +597,17 @@ def offlabel_model_evaluation(
         batch_size=batch_size
     )
 
+    # Convert numpy types to Python native types for JSON/Dagster serialization
+    # Convert all numeric values to float for Dagster type consistency
+    serializable_metrics = {
+        k: float(v) if isinstance(v, (np.integer, np.floating, int, float)) else v
+        for k, v in test_metrics.items()
+    }
+
     # Save test metrics
     metrics_path = Path("data/07_model_output/offlabel") / "09_test_metrics.json"
     with open(metrics_path, 'w') as f:
-        json.dump(test_metrics, f, indent=2)
+        json.dump(serializable_metrics, f, indent=2)
 
     context.log.info(f"Saved test metrics to {metrics_path}")
 
@@ -611,20 +619,20 @@ def offlabel_model_evaluation(
     context.log.info(f"Test Accuracy: {test_metrics['accuracy']:.4f}")
 
     return Output(
-        value=test_metrics,
+        value=serializable_metrics,
         metadata={
-            "auc_roc": test_metrics['auc_roc'],
-            "auc_pr": test_metrics['auc_pr'],
-            "accuracy": test_metrics['accuracy'],
-            "precision": test_metrics['precision'],
-            "recall": test_metrics['recall'],
-            "f1": test_metrics['f1'],
-            "sensitivity": test_metrics['sensitivity'],
-            "specificity": test_metrics['specificity'],
-            "true_positives": test_metrics['true_positives'],
-            "true_negatives": test_metrics['true_negatives'],
-            "false_positives": test_metrics['false_positives'],
-            "false_negatives": test_metrics['false_negatives'],
-            "all_metrics": MetadataValue.json(test_metrics),
+            "auc_roc": serializable_metrics['auc_roc'],
+            "auc_pr": serializable_metrics['auc_pr'],
+            "accuracy": serializable_metrics['accuracy'],
+            "precision": serializable_metrics['precision'],
+            "recall": serializable_metrics['recall'],
+            "f1": serializable_metrics['f1'],
+            "sensitivity": serializable_metrics['sensitivity'],
+            "specificity": serializable_metrics['specificity'],
+            "true_positives": serializable_metrics['true_positives'],
+            "true_negatives": serializable_metrics['true_negatives'],
+            "false_positives": serializable_metrics['false_positives'],
+            "false_negatives": serializable_metrics['false_negatives'],
+            "all_metrics": MetadataValue.json(serializable_metrics),
         },
     )
