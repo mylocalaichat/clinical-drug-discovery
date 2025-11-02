@@ -36,6 +36,15 @@ from .xgboost_drug_discovery import (
     xgboost_train_test_split,
     xgboost_trained_model,
 )
+from .offlabel_discovery import (
+    offlabel_edges_filtered,
+    offlabel_node_metadata,
+    offlabel_edges_pruned,
+    offlabel_train_test_split,
+    offlabel_hetero_graph,
+    offlabel_trained_model,
+    offlabel_model_evaluation,
+)
 
 # TODO: Enable link prediction assets after installing OpenMP (brew install libomp)
 # from .link_prediction import (
@@ -80,6 +89,14 @@ __all__ = [
     "xgboost_model_evaluation",
     "xgboost_predictions",
     "xgboost_ranked_results",
+    # Off-Label Drug Discovery with R-GCN
+    "offlabel_edges_filtered",
+    "offlabel_node_metadata",
+    "offlabel_edges_pruned",
+    "offlabel_train_test_split",
+    "offlabel_hetero_graph",
+    "offlabel_trained_model",
+    "offlabel_model_evaluation",
     # Link Prediction (disabled until OpenMP installed)
     # "link_prediction_drugs",
     # "link_prediction_diseases",
