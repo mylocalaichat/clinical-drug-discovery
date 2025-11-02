@@ -35,7 +35,7 @@ INCLUSION_EDGE_TYPES = {
     "drug_protein",
     "indication",
     "molfunc_protein",
-    "off-label_use",
+    "off-label use",
     "pathway_pathway",
     "pathway_protein",
     "phenotype_protein",
@@ -565,7 +565,7 @@ class OffLabelDataPreparator:
         """
         Prepare train/test splits for off-label drug discovery.
 
-        Positive examples: off-label_use edges
+        Positive examples: off-label use edges
         Negative examples: contraindications + random drug-disease pairs
 
         Args:
@@ -581,7 +581,7 @@ class OffLabelDataPreparator:
         logger.info("Preparing link prediction data...")
 
         # Extract off-label use edges (positives)
-        offlabel_edges = self.edges_df[self.edges_df['relation'] == 'off-label_use'].copy()
+        offlabel_edges = self.edges_df[self.edges_df['relation'] == 'off-label use'].copy()
         logger.info(f"Found {len(offlabel_edges):,} off-label use edges")
 
         # Split off-label edges into train/test
@@ -653,7 +653,7 @@ class OffLabelDataPreparator:
 
         # Get existing drug-disease pairs (indication, off-label, contraindication)
         existing_pairs = set()
-        for rel in ['indication', 'off-label_use', 'contraindication']:
+        for rel in ['indication', 'off-label use', 'contraindication']:
             edges = self.edges_df[self.edges_df['relation'] == rel]
             pairs = set(zip(edges['source_id'], edges['target_id']))
             existing_pairs.update(pairs)

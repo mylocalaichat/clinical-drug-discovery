@@ -261,7 +261,7 @@ def offlabel_train_test_split(
     """
     Step 3: Prepare train/validation/test splits for off-label drug discovery.
 
-    Positive examples: off-label_use edges
+    Positive examples: off-label use edges
     Negative examples: contraindications + random drug-disease pairs
 
     Args:
