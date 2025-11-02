@@ -429,33 +429,33 @@ class GraphPruner:
         initial_count = len(drug_drug_edges)
         logger.info(f"Initial drug-drug edges: {initial_count:,}")
 
-        # Group by source drug
-        pruned_edges = []
-        drugs = drug_drug_edges['source_id'].unique()
+        if initial_count == 0:
+            return edges_df
 
-        for i, drug_id in enumerate(drugs):
-            if i % 100 == 0:
-                logger.info(f"Processing drug {i+1}/{len(drugs)}")
+        # Vectorized similarity computation
+        logger.info("Computing similarities (optimized vectorized)...")
 
-            # Get all neighbors
-            neighbors = drug_drug_edges[drug_drug_edges['source_id'] == drug_id].copy()
+        # Get drug indications and proteins as sets for each edge
+        drug_indications = self.loader.drug_indications
+        drug_proteins = self.loader.drug_proteins
 
-            # Compute similarity for each neighbor
-            similarities = []
-            for _, edge in neighbors.iterrows():
-                neighbor_id = edge['target_id']
-                shared_ind, shared_prot = self.loader.compute_drug_similarity(drug_id, neighbor_id)
-                score = (5 * shared_ind) + (3 * shared_prot)
-                similarities.append(score)
+        # Compute similarity scores using list comprehension (much faster than apply)
+        similarities = [
+            (5 * len(drug_indications.get(src, set()) & drug_indications.get(tgt, set()))) +
+            (3 * len(drug_proteins.get(src, set()) & drug_proteins.get(tgt, set())))
+            for src, tgt in zip(drug_drug_edges['source_id'], drug_drug_edges['target_id'])
+        ]
+        drug_drug_edges['similarity_score'] = similarities
 
-            neighbors['similarity_score'] = similarities
-
-            # Keep top K
-            top_neighbors = neighbors.nlargest(top_k, 'similarity_score')
-            pruned_edges.append(top_neighbors)
+        logger.info("Selecting top K neighbors per drug...")
+        # Keep top K neighbors per drug using groupby
+        pruned_drug_drug = (drug_drug_edges
+                           .sort_values('similarity_score', ascending=False)
+                           .groupby('source_id', group_keys=False)
+                           .head(top_k)
+                           .reset_index(drop=True))
 
         # Combine pruned edges with other edge types
-        pruned_drug_drug = pd.concat(pruned_edges, ignore_index=True)
         final_edges = pd.concat([other_edges, pruned_drug_drug], ignore_index=True)
 
         logger.info(f"Pruned drug-drug edges: {initial_count:,} → {len(pruned_drug_drug):,} "
@@ -486,35 +486,35 @@ class GraphPruner:
         initial_count = len(prot_prot_edges)
         logger.info(f"Initial protein-protein edges: {initial_count:,}")
 
-        # Group by source protein
-        pruned_edges = []
-        proteins = prot_prot_edges['source_id'].unique()
+        if initial_count == 0:
+            return edges_df
 
-        for i, protein_id in enumerate(proteins):
-            if i % 500 == 0:
-                logger.info(f"Processing protein {i+1}/{len(proteins)}")
+        # Vectorized similarity computation
+        logger.info("Computing similarities (optimized vectorized)...")
 
-            # Get all neighbors
-            neighbors = prot_prot_edges[prot_prot_edges['source_id'] == protein_id].copy()
+        # Get protein relationships as sets
+        protein_bioprocesses = self.loader.protein_bioprocesses
+        protein_molfuncs = self.loader.protein_molfuncs
+        protein_diseases = self.loader.protein_diseases
 
-            # Compute similarity for each neighbor
-            similarities = []
-            for _, edge in neighbors.iterrows():
-                neighbor_id = edge['target_id']
-                shared_bp, shared_mf, shared_dis = self.loader.compute_protein_similarity(
-                    protein_id, neighbor_id
-                )
-                score = (5 * shared_bp) + (3 * shared_mf) + (4 * shared_dis)
-                similarities.append(score)
+        # Compute similarity scores using list comprehension (much faster than apply)
+        similarities = [
+            (5 * len(protein_bioprocesses.get(src, set()) & protein_bioprocesses.get(tgt, set()))) +
+            (3 * len(protein_molfuncs.get(src, set()) & protein_molfuncs.get(tgt, set()))) +
+            (4 * len(protein_diseases.get(src, set()) & protein_diseases.get(tgt, set())))
+            for src, tgt in zip(prot_prot_edges['source_id'], prot_prot_edges['target_id'])
+        ]
+        prot_prot_edges['similarity_score'] = similarities
 
-            neighbors['similarity_score'] = similarities
-
-            # Keep top K
-            top_neighbors = neighbors.nlargest(top_k, 'similarity_score')
-            pruned_edges.append(top_neighbors)
+        logger.info("Selecting top K neighbors per protein...")
+        # Keep top K neighbors per protein using groupby
+        pruned_prot_prot = (prot_prot_edges
+                           .sort_values('similarity_score', ascending=False)
+                           .groupby('source_id', group_keys=False)
+                           .head(top_k)
+                           .reset_index(drop=True))
 
         # Combine pruned edges with other edge types
-        pruned_prot_prot = pd.concat(pruned_edges, ignore_index=True)
         final_edges = pd.concat([other_edges, pruned_prot_prot], ignore_index=True)
 
         logger.info(f"Pruned protein-protein edges: {initial_count:,} → {len(pruned_prot_prot):,} "
