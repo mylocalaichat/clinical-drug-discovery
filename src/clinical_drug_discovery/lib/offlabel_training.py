@@ -34,6 +34,7 @@ from .offlabel_model import OffLabelRGCN
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # Neighborhood sampling configuration (Step 7)
@@ -102,9 +103,39 @@ class DrugDiseasePairDataset(Dataset):
         self.labels = labels
         self.node_mapping = node_mapping
 
-        # Map IDs to indices
-        self.drug_indices = [node_mapping['drug'][drug_id] for drug_id in drug_ids]
-        self.disease_indices = [node_mapping['disease'][disease_id] for disease_id in disease_ids]
+        # Filter out pairs where drug or disease IDs are not in node_mapping
+        valid_indices = []
+        valid_drug_indices = []
+        valid_disease_indices = []
+        valid_labels = []
+        
+        missing_drugs = set()
+        missing_diseases = set()
+        
+        for i, (drug_id, disease_id) in enumerate(zip(drug_ids, disease_ids)):
+            if drug_id in node_mapping['drug'] and disease_id in node_mapping['disease']:
+                valid_indices.append(i)
+                valid_drug_indices.append(node_mapping['drug'][drug_id])
+                valid_disease_indices.append(node_mapping['disease'][disease_id])
+                valid_labels.append(labels[i])
+            else:
+                if drug_id not in node_mapping['drug']:
+                    missing_drugs.add(drug_id)
+                if disease_id not in node_mapping['disease']:
+                    missing_diseases.add(disease_id)
+        
+        # Log warnings about missing nodes
+        if missing_drugs:
+            logger.warning(f"Filtered out {len(missing_drugs)} drug IDs not in node mapping: {list(missing_drugs)[:10]}...")
+        if missing_diseases:
+            logger.warning(f"Filtered out {len(missing_diseases)} disease IDs not in node mapping: {list(missing_diseases)[:10]}...")
+        
+        # Update with filtered data
+        self.drug_indices = valid_drug_indices
+        self.disease_indices = valid_disease_indices
+        self.labels = valid_labels
+        
+        logger.info(f"Dataset created with {len(self.labels)}/{len(drug_ids)} valid pairs")
 
     def __len__(self):
         return len(self.labels)
@@ -155,12 +186,15 @@ def create_dataloaders(
     val_dataset = DrugDiseasePairDataset(val_drugs, val_diseases, val_labels, node_mapping)
 
     # Create dataloaders
+    # Disable pin_memory on MPS (Apple Silicon) as it's not supported
+    use_pin_memory = torch.cuda.is_available()
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=use_pin_memory
     )
 
     val_loader = DataLoader(
@@ -168,7 +202,7 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=use_pin_memory
     )
 
     logger.info(f"Created dataloaders: {len(train_dataset)} train, {len(val_dataset)} val")
@@ -261,10 +295,10 @@ def train_epoch(
     total_samples = 0
 
     for batch in tqdm(train_loader, desc="Training", leave=False):
-        # Move batch to device
-        drug_indices = torch.tensor(batch['drug_index'], dtype=torch.long, device=device)
-        disease_indices = torch.tensor(batch['disease_index'], dtype=torch.long, device=device)
-        labels = torch.tensor(batch['label'], dtype=torch.float, device=device)
+        # Move batch to device (batch items are already tensors from DataLoader)
+        drug_indices = batch['drug_index'].to(device, dtype=torch.long)
+        disease_indices = batch['disease_index'].to(device, dtype=torch.long)
+        labels = batch['label'].to(device, dtype=torch.float)
 
         # Zero gradients
         optimizer.zero_grad()
@@ -324,10 +358,10 @@ def evaluate(
     total_loss = 0.0
 
     for batch in tqdm(val_loader, desc="Evaluating", leave=False):
-        # Move batch to device
-        drug_indices = torch.tensor(batch['drug_index'], dtype=torch.long, device=device)
-        disease_indices = torch.tensor(batch['disease_index'], dtype=torch.long, device=device)
-        labels = torch.tensor(batch['label'], dtype=torch.float, device=device)
+        # Move batch to device (batch items are already tensors from DataLoader)
+        drug_indices = batch['drug_index'].to(device, dtype=torch.long)
+        disease_indices = batch['disease_index'].to(device, dtype=torch.long)
+        labels = batch['label'].to(device, dtype=torch.float)
 
         # Forward pass
         predictions = model(data, drug_indices, disease_indices)
@@ -523,8 +557,8 @@ def test_model(
 
     with torch.no_grad():
         for batch in test_loader:
-            drug_indices = torch.tensor(batch['drug_index'], dtype=torch.long, device=device)
-            disease_indices = torch.tensor(batch['disease_index'], dtype=torch.long, device=device)
+            drug_indices = batch['drug_index'].to(device, dtype=torch.long)
+            disease_indices = batch['disease_index'].to(device, dtype=torch.long)
             labels = batch['label']
 
             predictions = model(data, drug_indices, disease_indices)

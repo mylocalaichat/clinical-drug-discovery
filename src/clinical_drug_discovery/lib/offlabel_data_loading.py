@@ -593,9 +593,14 @@ class OffLabelDataPreparator:
 
         logger.info(f"Split: {len(train_offlabel):,} train, {len(test_offlabel):,} test")
 
-        # Sample contraindications as negatives
-        contraindications = self.edges_df[self.edges_df['relation'] == 'contraindication'].copy()
-        logger.info(f"Total contraindications: {len(contraindications):,}")
+        # Create training graph (exclude test off-label edges)
+        train_graph_edges = self.edges_df[
+            ~self.edges_df.index.isin(test_offlabel.index)
+        ].copy()
+
+        # Sample contraindications as negatives (from training graph to ensure they're in node_mapping)
+        contraindications = train_graph_edges[train_graph_edges['relation'] == 'contraindication'].copy()
+        logger.info(f"Total contraindications in training graph: {len(contraindications):,}")
 
         sampled_contraindications = contraindications.sample(
             n=min(num_contraindication_samples, len(contraindications)),
@@ -604,9 +609,11 @@ class OffLabelDataPreparator:
         logger.info(f"Sampled {len(sampled_contraindications):,} contraindications as negatives")
 
         # Generate random negatives (drug-disease pairs with no edges)
+        # Use train_graph_edges to ensure all sampled drugs/diseases will be in node_mapping
         random_negatives = self._generate_random_negatives(
             num_samples=num_random_negatives,
-            random_seed=random_seed
+            random_seed=random_seed,
+            edges_df=train_graph_edges
         )
         logger.info(f"Generated {len(random_negatives):,} random negative pairs")
 
@@ -619,11 +626,6 @@ class OffLabelDataPreparator:
             test_size=test_size,
             random_state=random_seed
         )
-
-        # Create training graph (exclude test off-label edges)
-        train_graph_edges = self.edges_df[
-            ~self.edges_df.index.isin(test_offlabel.index)
-        ].copy()
 
         # Prepare final datasets
         result = {
@@ -643,18 +645,27 @@ class OffLabelDataPreparator:
 
         return result
 
-    def _generate_random_negatives(self, num_samples: int, random_seed: int) -> pd.DataFrame:
-        """Generate random drug-disease pairs with no existing edges."""
+    def _generate_random_negatives(self, num_samples: int, random_seed: int, edges_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """Generate random drug-disease pairs with no existing edges.
+
+        Args:
+            num_samples: Number of random negative pairs to generate
+            random_seed: Random seed for reproducibility
+            edges_df: Optional DataFrame to sample from. If None, uses self.edges_df
+        """
         np.random.seed(random_seed)
 
+        # Use provided edges_df or fall back to self.edges_df
+        source_edges = edges_df if edges_df is not None else self.edges_df
+
         # Get all drugs and diseases
-        all_drugs = self.edges_df[self.edges_df['source_type'] == 'drug']['source_id'].unique()
-        all_diseases = self.edges_df[self.edges_df['target_type'] == 'disease']['target_id'].unique()
+        all_drugs = source_edges[source_edges['source_type'] == 'drug']['source_id'].unique()
+        all_diseases = source_edges[source_edges['target_type'] == 'disease']['target_id'].unique()
 
         # Get existing drug-disease pairs (indication, off-label, contraindication)
         existing_pairs = set()
         for rel in ['indication', 'off-label use', 'contraindication']:
-            edges = self.edges_df[self.edges_df['relation'] == rel]
+            edges = source_edges[source_edges['relation'] == rel]
             pairs = set(zip(edges['source_id'], edges['target_id']))
             existing_pairs.update(pairs)
 
