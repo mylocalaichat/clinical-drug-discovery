@@ -389,18 +389,18 @@ def bulk_load_edges_to_memgraph(
     memgraph_uri: str,
     memgraph_user: str = "",
     memgraph_password: str = "",
-    batch_size: int = 5000,
+    batch_size: int = 50000,
     timeout: int = 300
 ) -> Dict[str, any]:
     """
     Efficiently load edges into Memgraph using bulk operations with proper transaction management.
-    
+
     Args:
         edges_df: DataFrame with columns: x_id, y_id, relation, display_relation
         memgraph_uri: Memgraph connection URI
         memgraph_user: Memgraph username
         memgraph_password: Memgraph password
-        batch_size: Number of edges to process per batch (default: 5000)
+        batch_size: Number of edges to process per batch (default: 50000)
         timeout: Transaction timeout in seconds (default: 300)
         
     Returns:

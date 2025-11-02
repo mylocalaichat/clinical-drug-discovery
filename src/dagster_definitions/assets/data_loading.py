@@ -254,7 +254,7 @@ def primekg_edges_loaded(
         memgraph_uri=os.getenv("MEMGRAPH_URI"),
         memgraph_user=os.getenv("MEMGRAPH_USER", ""),
         memgraph_password=os.getenv("MEMGRAPH_PASSWORD", ""),
-        batch_size=10000,  # Increased from 5000 for better performance
+        batch_size=10000,  # Load 10k edges at a time for optimal performance
         timeout=600  # Increased to 10 minutes for large batches
     )
 
