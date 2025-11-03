@@ -60,7 +60,7 @@ def cleanup_old_artifacts(context: AssetExecutionContext, file_patterns: list[st
                 Path(file_path).unlink()
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_edges_filtered(context: AssetExecutionContext, download_data: dict) -> Output[Dict[str, Any]]:
     """
     Step 1: Load edges from CSV files with selective edge type filtering.
@@ -130,7 +130,7 @@ def offlabel_edges_filtered(context: AssetExecutionContext, download_data: dict)
         loader.close()
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_edges_pruned(
     context: AssetExecutionContext,
     offlabel_edges_filtered: Dict[str, Any],
@@ -220,7 +220,7 @@ def offlabel_edges_pruned(
         loader.close()
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_node_metadata(
     context: AssetExecutionContext,
     offlabel_edges_pruned: Dict[str, Any]
@@ -286,7 +286,7 @@ def offlabel_node_metadata(
         loader.close()
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_train_test_split(
     context: AssetExecutionContext,
     offlabel_edges_pruned: Dict[str, Any],
@@ -395,7 +395,7 @@ def offlabel_train_test_split(
     )
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_hetero_graph(
     context: AssetExecutionContext,
     offlabel_train_test_split: Dict[str, Any],
@@ -469,7 +469,7 @@ def offlabel_hetero_graph(
     )
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_trained_model(
     context: AssetExecutionContext,
     offlabel_hetero_graph: Dict[str, Any],
@@ -598,7 +598,7 @@ def offlabel_trained_model(
     )
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_model_evaluation(
     context: AssetExecutionContext,
     offlabel_trained_model: Dict[str, Any],
@@ -690,7 +690,7 @@ def offlabel_model_evaluation(
     )
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_model_embeddings(
     context: AssetExecutionContext,
     offlabel_trained_model: Dict[str, Any],
@@ -779,8 +779,9 @@ def offlabel_model_embeddings(
         embeddings_df.insert(0, 'node_id', node_ids)
         embeddings_df.insert(1, 'node_name', node_names)
 
-        # Save to CSV
-        embeddings_path = output_dir / f"embeddings_{node_type}.csv"
+        # Save to CSV - sanitize node_type for filename (replace / with _)
+        safe_node_type = node_type.replace('/', '_').replace('\\', '_')
+        embeddings_path = output_dir / f"embeddings_{safe_node_type}.csv"
         embeddings_df.to_csv(embeddings_path, index=False)
         context.log.info(f"  Saved {node_type} embeddings to {embeddings_path}")
 
@@ -800,9 +801,26 @@ def offlabel_model_embeddings(
 
     context.log.info(f"Saved all embeddings to {output_dir / 'embeddings_all.npz'}")
 
+    # Create file URIs for easy access
+    file_uris_md = "## Embedding CSV Files\n\n"
+    for node_type, data in embeddings_output.items():
+        file_path = Path(data['file_path'])
+        abs_path = file_path.absolute()
+        file_uris_md += f"**{node_type}** ({data['embeddings'].shape[0]} nodes):\n"
+        file_uris_md += f"- File: `{file_path}`\n"
+        file_uris_md += f"- URI: `file://{abs_path}`\n\n"
+
+    context.log.info("=" * 80)
+    context.log.info("Embedding CSV files saved:")
+    for node_type, data in embeddings_output.items():
+        abs_path = Path(data['file_path']).absolute()
+        context.log.info(f"  {node_type}: file://{abs_path}")
+    context.log.info("=" * 80)
+
     return Output(
         value=embeddings_output,
         metadata={
+            "embedding_files": MetadataValue.md(file_uris_md),
             "num_node_types": len(all_embeddings),
             "embedding_dim": list(all_embeddings.values())[0].shape[1],
             "node_type_counts": {
@@ -814,7 +832,7 @@ def offlabel_model_embeddings(
     )
 
 
-@asset
+@asset(group_name="offlabel_discovery")
 def offlabel_novel_predictions(
     context: AssetExecutionContext,
     offlabel_trained_model: Dict[str, Any],
@@ -1093,6 +1111,181 @@ def offlabel_novel_predictions(
     )
 
 
+@asset(group_name="offlabel_discovery")
+def offlabel_embedding_visualizations(
+    context: AssetExecutionContext,
+    offlabel_model_embeddings: Dict[str, Any],
+) -> Output[Dict[str, Any]]:
+    """
+    Create interactive 2D and 3D PCA visualizations of ALL node type embeddings.
+
+    This asset can be run independently to visualize how the model learned to
+    represent all node types (drugs, diseases, proteins, pathways, etc.) in embedding space.
+
+    Args:
+        offlabel_model_embeddings: Embeddings for all node types from trained model
+
+    Returns:
+        Dictionary with paths to visualization files
+    """
+    context.log.info("=" * 80)
+    context.log.info("Creating embedding visualizations")
+    context.log.info("=" * 80)
+
+    # Clean up old visualization artifacts
+    viz_dir = Path("data/07_model_output/offlabel/visualizations")
+    if viz_dir.exists():
+        deleted_files = []
+        for html_file in viz_dir.glob("*.html"):
+            file_size_mb = html_file.stat().st_size / (1024 * 1024)
+            html_file.unlink()
+            deleted_files.append(f"{html_file.name} ({file_size_mb:.1f} MB)")
+            context.log.info(f"Deleted existing visualization: {html_file.name} ({file_size_mb:.1f} MB)")
+        if deleted_files:
+            context.log.info(f"Cleaned up {len(deleted_files)} visualization file(s)")
+    else:
+        context.log.info("Visualization directory does not exist yet, will be created")
+
+    # Extract embeddings from all node types
+    context.log.info("Loading embeddings for all node types...")
+
+    all_node_types = []
+    all_embeddings_list = []
+    node_type_counts = {}
+
+    for node_type, embedding_data in offlabel_model_embeddings.items():
+        embeddings_np = embedding_data['embeddings']
+        node_count = len(embeddings_np)
+        node_type_counts[node_type] = node_count
+
+        context.log.info(f"  {node_type}: {embeddings_np.shape}")
+
+        # Sample if too many nodes of this type
+        max_vis_samples_per_type = int(os.getenv("OFFLABEL_VIZ_MAX_SAMPLES_PER_TYPE", "1000"))
+        if node_count > max_vis_samples_per_type:
+            context.log.info(f"    Sampling {max_vis_samples_per_type} {node_type} nodes (out of {node_count})")
+            np.random.seed(42)
+            sample_idx = np.random.choice(node_count, max_vis_samples_per_type, replace=False)
+            sampled_embeddings = embeddings_np[sample_idx]
+        else:
+            sampled_embeddings = embeddings_np
+
+        # Add to combined list
+        all_embeddings_list.append(sampled_embeddings)
+        all_node_types.extend([node_type] * len(sampled_embeddings))
+
+    # Combine all embeddings
+    combined_embeddings = np.vstack(all_embeddings_list)
+
+    context.log.info(f"Visualization data: {len(combined_embeddings):,} total nodes across {len(node_type_counts)} node types")
+    context.log.info(f"  Node type breakdown: {node_type_counts}")
+
+    # Import Plotly
+    try:
+        from sklearn.decomposition import PCA
+        import plotly.express as px
+    except ImportError as e:
+        context.log.warning(f"Visualization libraries not available: {e}")
+        context.log.info("Install with: pip install scikit-learn plotly")
+        return Output(
+            value={"status": "skipped", "reason": "missing_dependencies"},
+            metadata={"status": "skipped", "reason": str(e)}
+        )
+
+    # Create visualization directory
+    viz_dir.mkdir(parents=True, exist_ok=True)
+
+    # PCA Analysis - compute 3 components for 2D and 3D plots
+    context.log.info("Computing PCA projection (2D and 3D)...")
+    pca = PCA(n_components=min(3, combined_embeddings.shape[1]), random_state=42)
+    pca_result = pca.fit_transform(combined_embeddings)
+
+    context.log.info(f"  PCA explained variance: PC1={pca.explained_variance_ratio_[0]:.2%}, "
+                    f"PC2={pca.explained_variance_ratio_[1]:.2%}, "
+                    f"PC3={pca.explained_variance_ratio_[2]:.2%}")
+
+    # Create PCA DataFrame with all node types
+    pca_df = pd.DataFrame({
+        'node_type': all_node_types,
+        'PC1': pca_result[:, 0],
+        'PC2': pca_result[:, 1],
+        'PC3': pca_result[:, 2] if pca_result.shape[1] > 2 else 0
+    })
+
+    # Create interactive Plotly visualizations
+    context.log.info("Creating interactive HTML plots...")
+
+    # PCA 2D scatter plot
+    fig_2d = px.scatter(
+        pca_df,
+        x='PC1',
+        y='PC2',
+        color='node_type',
+        title=f'Off-Label Drug Discovery: All Node Type Embeddings (PCA 2D) - {len(pca_df):,} nodes',
+        labels={'node_type': 'Node Type'},
+        width=1000,
+        height=700
+    )
+    fig_2d.update_traces(marker=dict(size=4, opacity=0.6))
+
+    # Save 2D plot
+    plot_2d_path = viz_dir / "offlabel_embeddings_pca_2d.html"
+    fig_2d.write_html(str(plot_2d_path))
+    context.log.info(f"✓ Saved 2D visualization to {plot_2d_path}")
+
+    # PCA 3D scatter plot
+    fig_3d = px.scatter_3d(
+        pca_df,
+        x='PC1',
+        y='PC2',
+        z='PC3',
+        color='node_type',
+        title=f'Off-Label Drug Discovery: All Node Type Embeddings (PCA 3D) - {len(pca_df):,} nodes',
+        labels={'node_type': 'Node Type'},
+        width=1000,
+        height=700
+    )
+    fig_3d.update_traces(marker=dict(size=2, opacity=0.6))
+
+    # Save 3D plot
+    plot_3d_path = viz_dir / "offlabel_embeddings_pca_3d.html"
+    fig_3d.write_html(str(plot_3d_path))
+    context.log.info(f"✓ Saved 3D visualization to {plot_3d_path}")
+
+    # Get absolute paths for file URIs
+    plot_2d_abs = plot_2d_path.absolute()
+    plot_3d_abs = plot_3d_path.absolute()
+
+    # Simple output - just the essential file locations (matching embedding_visualizations style)
+    context.log.info(f"📊 Visualized {len(pca_df):,} nodes across {len(node_type_counts)} node types")
+    for node_type, count in node_type_counts.items():
+        context.log.info(f"   - {node_type}: {count:,} nodes")
+    context.log.info(f"🖼️  2D Plot: file://{plot_2d_abs}")
+    context.log.info(f"🖼️  3D Plot: file://{plot_3d_abs}")
+
+    return Output(
+        value={
+            "pca_2d": str(plot_2d_path),
+            "pca_3d": str(plot_3d_path),
+            "pca_explained_variance": [float(x) for x in pca.explained_variance_ratio_.tolist()],
+            "node_type_counts": node_type_counts,
+        },
+        metadata={
+            "🖼️_2D_Plot_File": f"file://{plot_2d_abs}",
+            "🖼️_3D_Plot_File": f"file://{plot_3d_abs}",
+            "📊_total_nodes_visualized": len(pca_df),
+            "📊_num_node_types": len(node_type_counts),
+            "📊_node_type_counts": MetadataValue.json(node_type_counts),
+            "📐_embedding_dim": combined_embeddings.shape[1],
+            "📐_pca_variance_pc1": float(pca.explained_variance_ratio_[0]),
+            "📐_pca_variance_pc2": float(pca.explained_variance_ratio_[1]),
+            "📐_pca_variance_pc3": float(pca.explained_variance_ratio_[2]),
+            "2d_plot_file": str(plot_2d_path),
+            "3d_plot_file": str(plot_3d_path),
+        },
+    )
+
+
 @asset(
     deps=["offlabel_novel_predictions"],
     group_name="offlabel_discovery",
@@ -1129,7 +1322,7 @@ def offlabel_predictions_db(context: AssetExecutionContext) -> Output[None]:
 
     context.log.info(f"Connecting to PostgreSQL database '{postgres_db}' on {postgres_host}:{postgres_port}")
     context.log.info(f"Target schema: {postgres_schema}")
-    context.log.info(f"Target table: offlabel_predictions")
+    context.log.info("Target table: offlabel_predictions")
 
     # Try to connect and provide helpful error messages
     try:
