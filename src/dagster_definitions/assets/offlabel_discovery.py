@@ -39,6 +39,27 @@ from clinical_drug_discovery.lib.offlabel_training import (
 logger = logging.getLogger(__name__)
 
 
+def cleanup_old_artifacts(context: AssetExecutionContext, file_patterns: list[str]):
+    """
+    Clean up old artifact files before creating new ones.
+
+    Args:
+        context: Dagster execution context for logging
+        file_patterns: List of file paths or glob patterns to delete
+    """
+    for pattern in file_patterns:
+        path = Path(pattern)
+        if path.is_file():
+            context.log.info(f"Cleaning up old artifact: {path}")
+            path.unlink()
+        elif '*' in str(pattern):
+            # Handle glob patterns
+            import glob
+            for file_path in glob.glob(str(pattern)):
+                context.log.info(f"Cleaning up old artifact: {file_path}")
+                Path(file_path).unlink()
+
+
 @asset
 def offlabel_edges_filtered(context: AssetExecutionContext, download_data: dict) -> Output[Dict[str, Any]]:
     """
@@ -55,6 +76,9 @@ def offlabel_edges_filtered(context: AssetExecutionContext, download_data: dict)
     context.log.info("=" * 80)
     context.log.info("STEP 1: Loading graph with selective edge types from CSV")
     context.log.info("=" * 80)
+
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, ["data/06_models/offlabel/01_filtered_edges.csv"])
 
     # Use edges file from download_data asset
     edges_file = download_data["edges_file"]
@@ -126,6 +150,9 @@ def offlabel_edges_pruned(
     context.log.info("=" * 80)
     context.log.info("STEP 2: Pruning graph")
     context.log.info("=" * 80)
+
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, ["data/06_models/offlabel/02_pruned_edges.csv"])
 
     # Get pruning parameters
     drug_top_k = int(os.getenv("OFFLABEL_DRUG_TOP_K", "10"))
@@ -207,6 +234,9 @@ def offlabel_node_metadata(
     Returns:
         Dictionary with node metadata DataFrame and output file path
     """
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, ["data/06_models/offlabel/01_node_metadata.csv"])
+
     context.log.info("Extracting node metadata from pruned edges...")
 
     # Get pruned edges DataFrame from upstream asset
@@ -276,6 +306,17 @@ def offlabel_train_test_split(
     context.log.info("=" * 80)
     context.log.info("STEP 3: Preparing train/validation/test splits")
     context.log.info("=" * 80)
+
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, [
+        "data/07_model_output/offlabel/03_train_positives.csv",
+        "data/07_model_output/offlabel/03_train_negatives.csv",
+        "data/07_model_output/offlabel/03_val_positives.csv",
+        "data/07_model_output/offlabel/03_val_negatives.csv",
+        "data/07_model_output/offlabel/03_test_positives.csv",
+        "data/07_model_output/offlabel/03_test_negatives.csv",
+        "data/07_model_output/offlabel/03_train_edges.csv",
+    ])
 
     # Get pruned edges DataFrame from upstream asset
     pruned_edges_df = offlabel_edges_pruned["edges_df"]
@@ -370,6 +411,9 @@ def offlabel_hetero_graph(
     Returns:
         Dictionary with HeteroData graph and node mapping
     """
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, ["data/06_models/offlabel/04_node_mapping.json"])
+
     context.log.info("=" * 80)
     context.log.info("STEP 4: Creating heterogeneous graph")
     context.log.info("=" * 80)
@@ -441,6 +485,12 @@ def offlabel_trained_model(
     Returns:
         Dictionary with trained model and training history
     """
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, [
+        "data/06_models/offlabel/08_best_model.pt",
+        "data/07_model_output/offlabel/07_training_history.csv",
+    ])
+
     context.log.info("=" * 80)
     context.log.info("STEPS 5-8: Training R-GCN model")
     context.log.info("=" * 80)
@@ -641,6 +691,130 @@ def offlabel_model_evaluation(
 
 
 @asset
+def offlabel_model_embeddings(
+    context: AssetExecutionContext,
+    offlabel_trained_model: Dict[str, Any],
+    offlabel_hetero_graph: Dict[str, Any],
+    offlabel_node_metadata: Dict[str, Any],
+) -> Output[Dict[str, Any]]:
+    """
+    Extract and save final node embeddings from the trained model.
+
+    These embeddings can be used for:
+    - Visualization (t-SNE, UMAP)
+    - Clustering analysis
+    - Similarity search
+    - Understanding what the model learned
+
+    Args:
+        offlabel_trained_model: Trained model
+        offlabel_hetero_graph: Graph structure
+        offlabel_node_metadata: Node metadata with names
+
+    Returns:
+        Dictionary with embedding arrays and metadata
+    """
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, [
+        "data/06_models/offlabel/embeddings_*.csv",
+        "data/06_models/offlabel/embeddings_all.npz",
+    ])
+
+    context.log.info("=" * 80)
+    context.log.info("Extracting final embeddings from trained model")
+    context.log.info("=" * 80)
+
+    # Load model and data
+    model = offlabel_trained_model['model']
+    device = offlabel_trained_model['device']
+    node_mapping = offlabel_trained_model['node_mapping']
+    train_graph = offlabel_hetero_graph['graph']
+    nodes_df = offlabel_node_metadata['nodes_df']
+
+    # Load best model checkpoint
+    output_dir = Path("data/06_models/offlabel")
+    checkpoint_path = output_dir / "08_best_model.pt"
+
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        context.log.info(f"Loaded best model from {checkpoint_path}")
+    else:
+        context.log.warning("No checkpoint found, using current model state")
+
+    # Move to device and set to eval mode
+    model = model.to(device)
+    train_graph = train_graph.to(device)
+    model.eval()
+
+    # Extract embeddings
+    context.log.info("Computing final embeddings for all nodes...")
+    with torch.no_grad():
+        all_embeddings = model.encode(train_graph)
+
+    # Convert to numpy and save
+    embeddings_output = {}
+
+    for node_type, embeddings_tensor in all_embeddings.items():
+        # Convert to numpy
+        embeddings_np = embeddings_tensor.cpu().numpy()
+
+        context.log.info(f"  {node_type}: {embeddings_np.shape}")
+
+        # Get node IDs and names for this type
+        type_nodes = nodes_df[nodes_df['node_type'] == node_type].copy()
+
+        # Create mapping from index to node_id
+        idx_to_id = {idx: node_id for node_id, idx in node_mapping[node_type].items()}
+
+        # Create ordered list of node_ids matching embedding order
+        node_ids = [idx_to_id[i] for i in range(len(idx_to_id))]
+
+        # Get names
+        id_to_name = type_nodes.set_index('node_id')['node_name'].to_dict()
+        node_names = [id_to_name.get(nid, nid) for nid in node_ids]
+
+        # Save embeddings for this node type
+        embeddings_df = pd.DataFrame(embeddings_np)
+        embeddings_df.insert(0, 'node_id', node_ids)
+        embeddings_df.insert(1, 'node_name', node_names)
+
+        # Save to CSV
+        embeddings_path = output_dir / f"embeddings_{node_type}.csv"
+        embeddings_df.to_csv(embeddings_path, index=False)
+        context.log.info(f"  Saved {node_type} embeddings to {embeddings_path}")
+
+        embeddings_output[node_type] = {
+            'embeddings': embeddings_np,
+            'node_ids': node_ids,
+            'node_names': node_names,
+            'file_path': str(embeddings_path)
+        }
+
+    # Also save as numpy arrays for easy loading
+    np.savez(
+        output_dir / "embeddings_all.npz",
+        **{f"{node_type}_embeddings": data['embeddings']
+           for node_type, data in embeddings_output.items()}
+    )
+
+    context.log.info(f"Saved all embeddings to {output_dir / 'embeddings_all.npz'}")
+
+    return Output(
+        value=embeddings_output,
+        metadata={
+            "num_node_types": len(all_embeddings),
+            "embedding_dim": list(all_embeddings.values())[0].shape[1],
+            "node_type_counts": {
+                node_type: data['embeddings'].shape[0]
+                for node_type, data in embeddings_output.items()
+            },
+            "output_files": [data['file_path'] for data in embeddings_output.values()],
+        }
+    )
+
+
+@asset
 def offlabel_novel_predictions(
     context: AssetExecutionContext,
     offlabel_trained_model: Dict[str, Any],
@@ -663,6 +837,12 @@ def offlabel_novel_predictions(
     Returns:
         DataFrame with predicted novel off-label uses ranked by confidence
     """
+    # Clean up old artifacts
+    cleanup_old_artifacts(context, [
+        "data/07_model_output/offlabel/10_all_predictions.csv",
+        "data/07_model_output/offlabel/10_top_predictions.csv",
+    ])
+
     context.log.info("=" * 80)
     context.log.info("STEP 10: Predicting novel off-label drug uses")
     context.log.info("=" * 80)

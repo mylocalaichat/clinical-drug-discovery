@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "memgraph": {
+      "command": "/Users/raviramadoss/.local/bin/mcp-memgraph",
+      "args": []
+    },
+    "postgres": {
+      "command": "/Users/raviramadoss/.local/bin/postgres-mcp",
+      "args": [
+        "--access-mode=unrestricted"
+      ],
+      "env": {
+        "DATABASE_URI": "postgresql://dagster_user:dagster_password_123@localhost:5432/clinical_drug_discovery_db"
+      }
+    }
+  }
+}

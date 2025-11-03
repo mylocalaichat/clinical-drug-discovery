@@ -23,19 +23,44 @@ logger = logging.getLogger(__name__)
 
 
 # Edge type configuration
+# We INCLUDE all edge types initially, including the target edges we want to predict.
+# Later, during data preparation, we'll:
+#   1. Extract indication/off-label/contraindication as TRAINING LABELS
+#   2. Build the graph structure using ONLY the non-target edges (to avoid data leakage)
 INCLUSION_EDGE_TYPES = {
     "bioprocess_bioprocess",
     "bioprocess_protein",
-    "contraindication",
+    "contraindication",        # Included for extraction as negative labels
     "disease_disease",
     "disease_phenotype_positive",
     "disease_protein",
     "drug_drug",
     "drug_effect",
     "drug_protein",
-    "indication",
+    "indication",              # Included for extraction as positive labels
     "molfunc_protein",
-    "off-label use",
+    "off-label use",           # Included for extraction as positive labels
+    "pathway_pathway",
+    "pathway_protein",
+    "phenotype_protein",
+    "protein_protein",
+}
+
+# Edge types to use for GRAPH STRUCTURE (excludes target prediction edges)
+# These are the edges the GNN will use for message passing
+GRAPH_STRUCTURE_EDGE_TYPES = {
+    "bioprocess_bioprocess",
+    "bioprocess_protein",
+    # "contraindication",      # EXCLUDED from graph - used only as labels
+    "disease_disease",
+    "disease_phenotype_positive",
+    "disease_protein",
+    "drug_drug",
+    "drug_effect",
+    "drug_protein",
+    # "indication",            # EXCLUDED from graph - used only as labels
+    "molfunc_protein",
+    # "off-label use",         # EXCLUDED from graph - used only as labels
     "pathway_pathway",
     "pathway_protein",
     "phenotype_protein",
@@ -565,53 +590,91 @@ class OffLabelDataPreparator:
         """
         Prepare train/test splits for off-label drug discovery.
 
-        Positive examples: off-label use edges
-        Negative examples: contraindications + random drug-disease pairs
+        Positive examples: indication AND off-label use edges (therapeutic relationships)
+        Negative examples: contraindications + random drug-disease pairs (automatically balanced to match positives)
 
         Args:
-            test_size: Fraction of off-label edges to use for testing
-            num_contraindication_samples: Number of contraindications to sample as negatives
-            num_random_negatives: Number of random negatives to sample
+            test_size: Fraction of therapeutic edges to use for testing
+            num_contraindication_samples: MINIMUM number of contraindications to sample (auto-increased to balance positives)
+            num_random_negatives: MINIMUM number of random negatives to sample (auto-increased to balance positives)
             random_seed: Random seed for reproducibility
 
         Returns:
             Dictionary with keys: 'train_edges', 'test_edges', 'train_positives',
                                   'train_negatives', 'test_positives', 'test_negatives'
+
+        Note:
+            The function will automatically calculate the needed number of negatives to balance
+            the positive examples. If the provided num_contraindication_samples or num_random_negatives
+            are lower than needed, they will be increased to 75% and 25% of total positives respectively.
         """
         logger.info("Preparing link prediction data...")
 
-        # Extract off-label use edges (positives)
-        offlabel_edges = self.edges_df[self.edges_df['relation'] == 'off-label use'].copy()
-        logger.info(f"Found {len(offlabel_edges):,} off-label use edges")
+        # Extract therapeutic edges (positives): both indication AND off-label use
+        therapeutic_edges = self.edges_df[
+            self.edges_df['relation'].isin(['indication', 'off-label use'])
+        ].copy()
 
-        # Split off-label edges into train/test
-        train_offlabel, test_offlabel = train_test_split(
-            offlabel_edges,
+        indication_count = len(self.edges_df[self.edges_df['relation'] == 'indication'])
+        offlabel_count = len(self.edges_df[self.edges_df['relation'] == 'off-label use'])
+
+        logger.info(f"Found {len(therapeutic_edges):,} therapeutic edges:")
+        logger.info(f"  - {indication_count:,} indication edges")
+        logger.info(f"  - {offlabel_count:,} off-label use edges")
+
+        # Split therapeutic edges into train/test
+        train_positives, test_positives = train_test_split(
+            therapeutic_edges,
             test_size=test_size,
             random_state=random_seed
         )
 
-        logger.info(f"Split: {len(train_offlabel):,} train, {len(test_offlabel):,} test")
+        logger.info(f"Split: {len(train_positives):,} train, {len(test_positives):,} test")
 
-        # Create training graph (exclude test off-label edges)
+        # Create training graph: exclude ALL target edges (indication, off-label, contraindication)
+        # AND exclude test positive edges to prevent leakage
+        # This ensures the GNN learns from STRUCTURE, not from seeing the answer
+        target_edge_types = {'indication', 'off-label use', 'contraindication'}
+
         train_graph_edges = self.edges_df[
-            ~self.edges_df.index.isin(test_offlabel.index)
+            ~self.edges_df['relation'].isin(target_edge_types)
         ].copy()
 
-        # Sample contraindications as negatives (from training graph to ensure they're in node_mapping)
-        contraindications = train_graph_edges[train_graph_edges['relation'] == 'contraindication'].copy()
-        logger.info(f"Total contraindications in training graph: {len(contraindications):,}")
+        logger.info(f"Training graph edges (structure only, no target edges): {len(train_graph_edges):,}")
+        logger.info(f"  Excluded {len(self.edges_df) - len(train_graph_edges):,} target edges "
+                   f"(indication/off-label/contraindication)")
+
+        # Calculate how many negatives we need to balance the positives
+        num_positives = len(therapeutic_edges)
+        logger.info(f"Total positive examples (therapeutic edges): {num_positives:,}")
+
+        # Balance negatives to match positives (75% contraindications, 25% random)
+        # This ensures we have enough negatives to balance the dataset
+        target_contraindications = int(num_positives * 0.75)
+        target_random = int(num_positives * 0.25)
+
+        # Sample contraindications as negatives (from ORIGINAL edges, not training graph)
+        # Note: We get them from self.edges_df because we excluded them from train_graph_edges
+        # to prevent data leakage in the GNN structure
+        contraindications = self.edges_df[self.edges_df['relation'] == 'contraindication'].copy()
+        logger.info(f"Total contraindications available: {len(contraindications):,}")
+
+        # Use the larger of: default parameter or calculated target
+        actual_contraindications = max(num_contraindication_samples, target_contraindications)
+        actual_contraindications = min(actual_contraindications, len(contraindications))
 
         sampled_contraindications = contraindications.sample(
-            n=min(num_contraindication_samples, len(contraindications)),
+            n=actual_contraindications,
             random_state=random_seed
         )
         logger.info(f"Sampled {len(sampled_contraindications):,} contraindications as negatives")
 
         # Generate random negatives (drug-disease pairs with no edges)
         # Use train_graph_edges to ensure all sampled drugs/diseases will be in node_mapping
+        actual_random = max(num_random_negatives, target_random)
+
         random_negatives = self._generate_random_negatives(
-            num_samples=num_random_negatives,
+            num_samples=actual_random,
             random_seed=random_seed,
             edges_df=train_graph_edges
         )
@@ -619,6 +682,7 @@ class OffLabelDataPreparator:
 
         # Combine negatives
         all_negatives = pd.concat([sampled_contraindications, random_negatives], ignore_index=True)
+        logger.info(f"Total negative examples: {len(all_negatives):,} (target was ~{num_positives:,} to balance positives)")
 
         # Split negatives into train/test (same ratio)
         train_negatives, test_negatives = train_test_split(
@@ -631,17 +695,17 @@ class OffLabelDataPreparator:
         result = {
             'train_edges': train_graph_edges,  # Graph for training (excludes test positives)
             'test_edges': self.edges_df,  # Full graph for testing
-            'train_positives': train_offlabel,
+            'train_positives': train_positives,
             'train_negatives': train_negatives,
-            'test_positives': test_offlabel,
+            'test_positives': test_positives,
             'test_negatives': test_negatives,
         }
 
         logger.info("Final dataset sizes:")
-        logger.info(f"  Train: {len(train_offlabel):,} pos + {len(train_negatives):,} neg = "
-                   f"{len(train_offlabel) + len(train_negatives):,} total")
-        logger.info(f"  Test: {len(test_offlabel):,} pos + {len(test_negatives):,} neg = "
-                   f"{len(test_offlabel) + len(test_negatives):,} total")
+        logger.info(f"  Train: {len(train_positives):,} pos + {len(train_negatives):,} neg = "
+                   f"{len(train_positives) + len(train_negatives):,} total")
+        logger.info(f"  Test: {len(test_positives):,} pos + {len(test_negatives):,} neg = "
+                   f"{len(test_positives) + len(test_negatives):,} total")
 
         return result
 
